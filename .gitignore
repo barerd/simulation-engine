@@ -1,0 +1,30 @@
+# R
+.Rhistory
+.Rapp.history
+.RData
+.Ruserdata
+.Rproj.user/
+*.Rproj
+
+# macOS
+.DS_Store
+.Icon?
+.Spotlight-V100
+.Trashes
+
+# Renv/packrat (if you use them)
+renv/library/
+packrat/lib*/
+
+# Logs / temp / outputs
+*.log
+*.tmp
+*.aux
+*.out
+*.pdf
+*.html
+*.png
+*.jpg
+
+# Large data (adjust to your project)
+data/raw/

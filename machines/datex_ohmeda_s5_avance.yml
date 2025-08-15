@@ -1,0 +1,50 @@
+device:
+  class: "DatexOhmedaS5Avance"
+  name: "datex_ohmeda_s5_avance"
+  manufacturer: "Datex Ohmeda"
+  model: "S5/Avance"
+  year: 2018
+
+  # Flows & ventilation
+  o2_flow: 2.0          # L/min
+  air_flow: 2.0         # L/min
+  n2o_flow: 0.0         # L/min
+  frequency: 12         # breaths/min
+  tidal_volume: 500     # mL
+
+  # Display smoothing for FiO2/FiN2O
+  datex_tau: 5.0        # seconds
+
+  # Vaporizer bank (interlocked; open exactly one at a time)
+  vaporizers:
+    sevoflurane:
+      vaporizer_setting: 2.0      # vol %
+      is_open: false
+      response_tau: 5.0           # seconds (rise toward setting)
+      residual_decay_tau: 60.0    # seconds (washout when closed)
+
+    desflurane:
+      vaporizer_setting: 0.0
+      is_open: false
+      response_tau: 5.0
+      residual_decay_tau: 60.0
+
+    isoflurane:
+      vaporizer_setting: 0.0
+      is_open: false
+      response_tau: 5.0
+      residual_decay_tau: 60.0
+
+  # # Vaporizer bank configuration
+  # max_slots: 2
+  # agents: ["sevoflurane", "desflurane"]
+  # vaporizers:
+  #   sevoflurane:
+  #     vaporizer_setting: 0.0
+  #     is_open: false
+  #     response_tau: 5.0
+  #   desflurane:
+  #     vaporizer_setting: 0.0
+  #     is_open: false  
+  #     response_tau: 3.0  # Desflurane responds faster
+
