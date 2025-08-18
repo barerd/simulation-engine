@@ -1,4 +1,4 @@
-DatexOhmedaS5Avance <- R6::R6Class(
+DatexOhmedaS5Avance <- R6Class(
   "DatexOhmedaS5Avance", 
   inherit = Device,
   public = list(
@@ -51,6 +51,8 @@ DatexOhmedaS5Avance <- R6::R6Class(
     },
     close_vaporizer = function(agent) {
       self$vaporizer_bank$close_vaporizer(agent)
+      vap <- self$vaporizers[[agent]]
+      vap$vaporizer_setting <- 0
     },
     get_vaporizer_status = function() {
       self$vaporizer_bank$get_vaporizer_status()
@@ -113,11 +115,16 @@ DatexOhmedaS5Avance <- R6::R6Class(
         total_fresh_gas_flow = self$total_fresh_gas_flow(),
         fio2 = self$current_fio2,
         fin2o = self$current_fin2o,
-        fi_agents = volatile_agents,
+        fi_agents = volatile_agents,  # This will be picked up by lungs
         vaporizer_bank_status = self$vaporizer_bank$get_bank_status(),
         frequency = self$frequency,
         tidal_volume = self$tidal_volume
-      ), notify = TRUE)
+      ))
+    },
+    
+    get_current_fi_agents = function() {
+      # Source of truth = vaporizer bank
+      self$vaporizer_bank$current_fi_agents %||% list()
     }
   )
 )

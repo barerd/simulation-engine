@@ -14,6 +14,9 @@ VaporizerBank <- R6Class(
     # Track which agents are available (for validation)
     available_agents = character(0),
     
+    # ADDED: Track active agent name for easier access
+    active_agent = NULL,
+    
     initialize = function(parent_device = NULL, settings = list(), node_id = NULL, bus = NULL) {
       super$initialize("vaporizer_bank", parent_device, node_id, bus)
       
@@ -29,7 +32,16 @@ VaporizerBank <- R6Class(
       # Initialize current fractions
       self$initialize_agent_fractions()
       
+      # FIXED: Ensure we have a proper node_id for bus publishing
+      if (is.null(self$node_id)) {
+        self$node_id <- "vaporizer_bank"
+      }
+      
+      # FIXED: Initial publishing to establish bus data
+      self$publish_data()
+      
       cat("VaporizerBank initialized with agents:", paste(names(self$vaporizers), collapse = ", "), "\n")
+      cat("Initial bus publication completed\n")
     },
     
     # === CONFIGURATION HELPERS ===
@@ -90,6 +102,20 @@ VaporizerBank <- R6Class(
         # Initialize to setting if open, otherwise 0
         self$current_fi_agents[[agent]] <- if (v$is_open) v$vaporizer_setting / 100 else 0.0
       }
+      
+      # Update active agent
+      self$update_active_agent()
+    },
+    
+    # ADDED: Update active agent tracking
+    update_active_agent = function() {
+      self$active_agent <- NULL
+      for (agent in self$available_agents) {
+        if (isTRUE(self$vaporizers[[agent]]$is_open)) {
+          self$active_agent <- agent
+          break
+        }
+      }
     },
     
     # === SETTERS (callable via HTTP API) ===
@@ -107,6 +133,10 @@ VaporizerBank <- R6Class(
       self$vaporizers[[agent]]$vaporizer_setting <- max(0, min(8, as.numeric(value)))
       
       cat("Set", agent, "vaporizer to", self$vaporizers[[agent]]$vaporizer_setting, "%\n")
+      
+      # FIXED: Publish immediately after changes
+      self$publish_data()
+      
       invisible(TRUE)
     },
     
@@ -126,9 +156,15 @@ VaporizerBank <- R6Class(
       # Open the requested vaporizer
       self$vaporizers[[agent]]$is_open <- TRUE
       
+      # Update active agent
+      self$update_active_agent()
+      
       # Log which slot is now active
       slot_num <- self$vaporizers[[agent]]$slot_number
       cat("Opened", agent, "vaporizer in slot", slot_num, "- all others closed due to interlock\n")
+      
+      # FIXED: Publish immediately after changes
+      self$publish_data()
       
       invisible(TRUE)
     },
@@ -142,8 +178,15 @@ VaporizerBank <- R6Class(
       }
       
       self$vaporizers[[agent]]$is_open <- FALSE
+      
+      # Update active agent
+      self$update_active_agent()
+      
       slot_num <- self$vaporizers[[agent]]$slot_number
       cat("Closed", agent, "vaporizer in slot", slot_num, "\n")
+      
+      # FIXED: Publish immediately after changes
+      self$publish_data()
       
       invisible(TRUE)
     },
@@ -152,7 +195,15 @@ VaporizerBank <- R6Class(
       for (agent in names(self$vaporizers)) {
         self$vaporizers[[agent]]$is_open <- FALSE
       }
+      
+      # Update active agent
+      self$update_active_agent()
+      
       cat("Closed all vaporizers\n")
+      
+      # FIXED: Publish immediately after changes
+      self$publish_data()
+      
       invisible(TRUE)
     },
     
@@ -213,15 +264,13 @@ VaporizerBank <- R6Class(
     
     get_active_agent = function() {
       # Return which agent is currently open (if any)
-      for (agent in self$available_agents) {
-        if (isTRUE(self$vaporizers[[agent]]$is_open)) {
-          return(list(
-            agent = agent,
-            slot = self$vaporizers[[agent]]$slot_number,
-            setting = self$vaporizers[[agent]]$vaporizer_setting,
-            current_fi = self$current_fi_agents[[agent]] %||% 0
-          ))
-        }
+      if (!is.null(self$active_agent)) {
+        return(list(
+          agent = self$active_agent,
+          slot = self$vaporizers[[self$active_agent]]$slot_number,
+          setting = self$vaporizers[[self$active_agent]]$vaporizer_setting,
+          current_fi = self$current_fi_agents[[self$active_agent]] %||% 0
+        ))
       }
       return(NULL)  # No agent is open
     },
@@ -264,18 +313,46 @@ VaporizerBank <- R6Class(
       1 - exp(-as.numeric(dt) / max(1e-6, as.numeric(tau)))
     },
     
+    # FIXED: Enhanced publishing with multiple methods
     publish_data = function() {
-      if (is.null(self$bus)) return(invisible())
+      if (is.null(self$bus)) {
+        cat("Warning: No bus available for publishing VaporizerBank data\n")
+        return(invisible())
+      }
       
-      self$publish_params(list(
-        component = "vaporizer_bank",
-        max_slots = self$max_slots,
-        installed_agents = self$available_agents,
-        active_agent = self$get_active_agent(),
-        vaporizers = self$vaporizers,
-        current_fi_agents = self$current_fi_agents,
-        total_volatile_fi = self$get_total_volatile_concentration()
-      ), notify = TRUE)
+      # Method 1: Use the standard publish_params (if available from DevicePart)
+      if (exists("publish_params", where = self, inherits = TRUE)) {
+        tryCatch({
+          self$publish_params(list(
+            component = "vaporizer_bank",
+            max_slots = self$max_slots,
+            installed_agents = self$available_agents,
+            active_agent = self$get_active_agent(),
+            vaporizers = self$vaporizers,
+            current_fi_agents = self$current_fi_agents,
+            total_volatile_fi = self$get_total_volatile_concentration()
+          ))
+        }, error = function(e) {
+          cat("Error in publish_params:", e$message, "\n")
+        })
+      }
+      
+      # Method 2: Direct bus parameter setting with multiple topic patterns
+      tryCatch({
+        # Publish under vaporizer_bank scope
+        self$bus$set_param(self$node_id, "current_fi_agents", self$current_fi_agents, notify = TRUE)
+        self$bus$set_param(self$node_id, "active_agent", self$active_agent, notify = TRUE)
+        self$bus$set_param(self$node_id, "available_agents", self$available_agents, notify = TRUE)
+      }, error = function(e) {
+        cat("Error publishing to bus:", e$message, "\n")
+      })
+      
+      invisible(TRUE)
+    },
+    
+    get_current_fi_agents = function() {
+      # Always return a plain named list of numerics
+      lapply(self$current_fi_agents, as.numeric)
     }
   )
 )

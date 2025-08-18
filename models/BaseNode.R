@@ -2,11 +2,15 @@ BaseNode <- R6Class(
   "BaseNode",
   public = list(
     node_id = NULL, bus = NULL, subscriptions = character(),
-    initialize = function(node_id = NULL) {
-      self$node_id <- node_id %||% paste0(tolower(class(self)[1L]), "_", as.integer(stats::runif(1, 1, 1e6)))
+    initialize = function(node_id = NULL, bus = NULL) {
+      self$node_id <- node_id %||% paste0(tolower(class(self)[1L]), "_", as.integer(stats::runif(1, min = 1, max = 1e6)))
+      if (!is.null(bus)) self$connect_bus(bus)
     },
     connect_bus = function(bus, node_id = NULL) {
-      stopifnot(inherits(bus, "MessageBus")); self$bus <- bus; if (!is.null(node_id)) self$node_id <- node_id; invisible(TRUE)
+      stopifnot(inherits(bus, "MessageBus")); 
+      self$bus <- bus; 
+      if (!is.null(node_id)) self$node_id <- node_id
+      invisible(TRUE)
     },
     set_param = function(name, value, notify = TRUE)  self$bus$set_param(self$node_id, name, value, notify),
     publish_params = function(named_list)             self$bus$set_params(self$node_id, named_list, notify = TRUE),

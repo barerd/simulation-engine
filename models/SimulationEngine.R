@@ -27,11 +27,30 @@ SimulationEngine <- R6Class(
       self$step_interval <- step_interval
       self$http_port <- http_port
       
-      if (!is.null(bus)) self$connect_bus(bus)
+      if (is.null(bus)) {
+        bus <- MessageBus$new()
+      }
+      self$connect_bus(bus)
       
       # Initialize components from config files
       self$initialize_patient(patient_config)
       self$initialize_machine(machine_config)
+      
+      # Wire the gas source into the patient’s lungs (safe)
+      if (!is.null(self$patient) &&
+          !is.null(self$patient$systems$respiratory) &&
+          !is.null(self$machine)) {
+        
+        rs <- self$patient$systems$respiratory
+        if (is.function(rs$set_gas_source)) {
+          rs$set_gas_source(self$machine)
+        } else if (!is.null(rs$organs$lungs) && is.function(rs$organs$lungs$set_gas_source)) {
+          # Fallback: wire directly into lungs if RespiratorySystem doesn’t expose the method
+          rs$organs$lungs$set_gas_source(self$machine)
+        } else {
+          message("No set_gas_source() method found on respiratory system or lungs; skipping auto-wiring.")
+        }
+      }
       
       # Initialize HTTP controller and server
       self$http_controller <- HTTPController$new(self)
@@ -42,24 +61,34 @@ SimulationEngine <- R6Class(
     initialize_patient = function(config_path) {
       if (is.null(config_path)) {
         cat("No patient configuration provided. Using default patient.\n")
-        self$patient <- list(
-          name = "Default Patient",
-          age = 35,
-          weight = 70,
-          physiological_state = list(
-            heart_rate = 70,
-            blood_pressure_systolic = 120,
-            blood_pressure_diastolic = 80
-          )
-        )
+        self$patient <- Patient$new(node_id = "patient", bus = self$bus)
       } else {
         if (!file.exists(config_path)) {
           stop(paste("Patient configuration file not found:", config_path))
         }
         
         cat("Loading patient configuration from:", config_path, "\n")
-        self$patient <- yaml::read_yaml(config_path)
-        cat("Patient loaded:", self$patient$name %||% self$patient$patient$name %||% "Unknown", "\n")
+        patient_config <- yaml::read_yaml(config_path)
+        
+        # Create a Patient R6 object
+        patient <- Patient$new(node_id = "patient", bus = self$bus)
+        
+        # Demographics
+        patient$age    <- patient_config$age    %||% patient$age
+        patient$weight <- patient_config$weight %||% patient$weight
+        patient$height <- patient_config$height %||% patient$height
+        patient$gender <- patient_config$gender %||% patient$gender
+        
+        # Initialize systems
+        if (!is.null(patient_config$systems)) {
+          for (sys in patient_config$systems) {
+            sys_class <- get(sys$class, envir = globalenv())
+            sys_obj   <- sys_class$new(patient = patient, config = sys, bus = self$bus)
+            patient$add_system(sys$name, sys_obj)
+          }
+        }
+        
+        self$patient <- patient
       }
     },
     
@@ -220,9 +249,39 @@ SimulationEngine <- R6Class(
     
     shutdown = function() {
       private$finalize()
+    },
+    
+    connect_patient_to_machine_manual_mask = function(mask_seal = 0.3) {
+      mm <- DatexManualMask$new(self$machine, mask_seal = mask_seal)
+      # you may want to sync demand from patient lungs:
+      lungs <- self$patient$systems$respiratory$organs$lungs
+      mm$patient_minute_vent_L_min <- lungs$VA_L_min * 1.2  # rough total MV vs alveolar
+      self$patient$systems$respiratory$set_gas_source(mm)
+      invisible(TRUE)
+    },
+    
+    connect_patient_to_machine_controlled = function() {
+      # simplest: lungs pull directly from the machine (no dilution)
+      src <- list(
+        get_current_fi_agents = function() self$machine$vaporizer_bank$get_volatile_agent_composition(),
+        get_fio2 = function() self$machine$current_fio2
+      )
+      class(src) <- "GasSource"
+      self$patient$systems$respiratory$set_gas_source(src)
+      invisible(TRUE)
+    },
+    
+    disconnect_patient_to_room_air = function() {
+      room <- list(
+        get_current_fi_agents = function() list(),  # no agents
+        get_fio2 = function() 0.21
+      )
+      class(room) <- "GasSource"
+      self$patient$systems$respiratory$set_gas_source(room)
+      invisible(TRUE)
     }
   ),
-
+  
   private = list(
     # Cleanup
     finalize = function() {

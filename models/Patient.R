@@ -2,15 +2,14 @@ Patient <- R6Class(
   "Patient",
   inherit = BaseNode,
   public = list(
-    age = 40, weight = 70, height = 170, gender = "male",
+    age = 40, weight = 70, height = 170, gender = "male", systems = NULL,
     
     initialize = function(node_id = NULL, bus = NULL) {
       super$initialize(node_id = node_id)
-      self$systems <- list()
       if (!is.null(bus)) self$connect_bus(bus)
       
       # Publish initial demographics
-      self$publish_demographics()
+      # self$publish_demographics()
     },
     
     add_system = function(name, system_instance) {
@@ -37,6 +36,30 @@ Patient <- R6Class(
         try(self$systems[[nm]]$update(dt), silent = TRUE)
       }
       invisible(TRUE)
+    },
+    
+    # Getter for Fi of a specific agent
+    get_fi = function(agent) {
+      if (is.null(self$systems$respiratory)) {
+        stop("Respiratory system not connected")
+      }
+      return(self$systems$respiratory$get_fi(agent))
+    },
+    
+    # Getter for FA (alveolar fraction), if your model has it
+    get_fa = function(agent) {
+      if (is.null(self$systemsrespiratory)) {
+        stop("Respiratory system not connected")
+      }
+      return(self$systemsrespiratory$get_fa(agent))
+    },
+    
+    # Getter for MAC fraction (total effect)
+    get_mac_fraction = function() {
+      if (is.null(self$systemsrespiratory)) {
+        return(0)
+      }
+      return(self$systemsrespiratory$get_total_mac())
     }
   )
 )

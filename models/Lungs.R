@@ -2,14 +2,12 @@ Lungs <- R6Class(
   "Lungs",
   inherit = Organ,
   public = list(
+    gas_source = NULL,
     # Environment & constants
     PB = 760,     # barometric pressure (mmHg)
     PH2O = 47,    # water vapor pressure (mmHg)
     RQ = 0.8,     # respiratory quotient
     K_CO2 = 0.863,    # mmHg · L / (mL); used in PACO2 = 0.863 * VCO2 / VA
-    
-    # Add params field to avoid locked environment error
-    params = NULL,
     
     # CO2 state (alveolar & arterial)
     PACO2 = NA_real_,        # alveolar CO2 partial pressure (mmHg)
@@ -38,16 +36,26 @@ Lungs <- R6Class(
     
     # Ventilation
     VA_L_min = 4.2,          # alveolar ventilation (L/min) if no ventilator yet
-    device_scope = "datex1", # used for FiO2; can later also carry VA
-    metabolic_scope = NULL,  # will default to "<patient>.metabolic"
+
+    # Current inspired fractions (what reaches the lungs, after mixing/delays)
+    Fi_agents = list(),         # e.g., list(sevoflurane = 0.018, desflurane = 0.0)
     
-    # Volatile anesthetics
-    Fi_agent = 0,
-    Fa_agent = 0,
-    tau_agent_sec = 10,
-    current_agent = "sevoflurane",
+    # Airway/Proximal mixed inspired concentration (low-pass of Fi)
+    FA_agents  = list(),   # "airway" stage: approaches Fi with tau_agent_fi_sec
     
-    mirror_to_patient_scope = TRUE,  # publish a copy under patient scope for backward-compat
+    # Current alveolar fractions (equilibrated with blood)
+    Fa_agents = list(),         # e.g., list(sevoflurane = 0.015, desflurane = 0.0)
+    
+    # Optional: Arterial concentration (low-pass of Fa)
+    Pa_agents  = list(),   # "arterial" stage: approaches Fa with tau_agent_pa_sec
+    
+    # Time constants for each agent (can be agent-specific)
+    tau_agent_fi_sec = 8,       # proximal/airway mixing to “what actually reaches alveoli"
+    tau_agent_fa_sec = 15,      # alveolo-arteriolar equilibration
+    tau_agent_pa_sec = 20,   # Fa -> Pa (arterial)
+    
+    # Add params field to avoid locked environment error
+    params = NULL,
     
     set_local_param = function(key, value, notify = TRUE) {
       # Initialize params if NULL
@@ -73,13 +81,20 @@ Lungs <- R6Class(
       super$initialize(name = name, patient = patient, config = config,
                        node_id = node_id, bus = bus)
       
-      if (!is.null(config$device_scope)) self$device_scope <- config$device_scope
+      if (is.null(self$bus) && !is.null(bus)) self$connect_bus(bus)
+      
       if (!is.null(config$tau_seconds))  self$tau_seconds  <- config$tau_seconds
       if (!is.null(config$RQ))           self$RQ           <- config$RQ
       if (!is.null(config$VA_L_min))     self$VA_L_min     <- config$VA_L_min
       if (!is.null(config$tau_co2_alv_sec))   self$tau_co2_alv_sec   <- config$tau_co2_alv_sec
       if (!is.null(config$tau_co2_blood_sec)) self$tau_co2_blood_sec <- config$tau_co2_blood_sec
       if (!is.null(config$metabolic_scope))   self$metabolic_scope   <- config$metabolic_scope
+      if (!is.null(config$tau_agent_fi_sec))  self$tau_agent_fi_sec  <- config$tau_agent_fi_sec
+      if (!is.null(config$tau_agent_fa_sec))  self$tau_agent_fa_sec  <- config$tau_agent_fa_sec
+      if (!is.null(config$tau_agent_pa_sec))  self$tau_agent_pa_sec  <- config$tau_agent_pa_sec
+      
+      if (!is.null(config$alveolar_po2)) self$alveolar_po2 <- config$alveolar_po2
+      if (!is.null(config$arterial_o2))  self$arterial_o2  <- config$arterial_o2
       
       # Pathophysiology parameters
       if (!is.null(config$shunt_fraction))    self$shunt_fraction    <- config$shunt_fraction
@@ -88,93 +103,42 @@ Lungs <- R6Class(
       
       if (!is.null(config$alveolar_po2))       self$alveolar_po2       <- config$alveolar_po2
       if (!is.null(config$arterial_o2))       self$arterial_o2       <- config$arterial_o2
-      
-      # Default metabolic scope if not provided
-      if (is.null(self$metabolic_scope) && !is.null(self$patient) && !is.null(self$patient$node_id)) {
-        self$metabolic_scope <- paste0(self$patient$node_id, ".metabolic")
-      }
-      
-      # Subscribe to device FiO2 leaf; compute immediately on changes
+        
+      # Metabolism (optional)
       if (!is.null(self$bus)) {
         self$subscribe(
-          pattern = sprintf("^state/%s/fio2$", self$device_scope),
+          pattern = "^state/.*/vco2_ml_min$",
           callback = function(topic, msg) {
-            self$last_fio2 <- as.numeric(msg$value)
-            self$compute_targets()
-            self$publish_outputs()  # publish new target immediately (optional)
+            self$last_vco2_ml_min <- as.numeric(if (is.list(msg) && !is.null(msg$value)) msg$value else msg)
+            self$compute_targets(); self$publish_outputs()
           },
           replay = TRUE
         )
-        # VCO2 and VO2 from MetabolicSystem (if present)
-        if (!is.null(self$metabolic_scope)) {
-          self$subscribe(
-            pattern = sprintf("^state/%s/vco2_ml_min$", self$metabolic_scope),
-            callback = function(topic, msg) {
-              self$last_vco2_ml_min <- as.numeric(msg$value)
-              self$compute_targets()
-              self$publish_outputs()
-            },
-            replay = TRUE
-          )
-          self$subscribe(
-            pattern = sprintf("^state/%s/vo2_ml_min$", self$metabolic_scope),
-            callback = function(topic, msg) {
-              self$last_vo2_ml_min <- as.numeric(msg$value)
-              # if both present, refresh RQ from data
-              if (is.finite(self$last_vco2_ml_min) && is.finite(self$last_vo2_ml_min) &&
-                  self$last_vo2_ml_min > 0) {
-                self$RQ <- self$last_vco2_ml_min / self$last_vo2_ml_min
-              }
-              self$compute_targets()
-              self$publish_outputs()
-            },
-            replay = TRUE
-          )
-        }
+        self$subscribe(
+          pattern = "^state/.*/vo2_ml_min$",
+          callback = function(topic, msg) {
+            self$last_vo2_ml_min <- as.numeric(if (is.list(msg) && !is.null(msg$value)) msg$value else msg)
+            if (is.finite(self$last_vco2_ml_min) && is.finite(self$last_vo2_ml_min) && self$last_vo2_ml_min > 0)
+              self$RQ <- self$last_vco2_ml_min / self$last_vo2_ml_min
+            self$compute_targets(); self$publish_outputs()
+          },
+          replay = TRUE
+        )
       }
       
-      # Seed from bus (FiO2; VCO2/VO2 if published)
-      if (!is.null(self$bus)) {
-        val <- self$get_param(self$device_scope, "fio2", default = NA_real_)
-        if (is.finite(val)) self$last_fio2 <- val
-        if (!is.null(self$metabolic_scope)) {
-          vco2 <- self$get_param(self$metabolic_scope, "vco2_ml_min", default = NA_real_)
-          vo2  <- self$get_param(self$metabolic_scope, "vo2_ml_min",  default = NA_real_)
-          if (is.finite(vco2)) self$last_vco2_ml_min <- vco2
-          if (is.finite(vo2))  self$last_vo2_ml_min  <- vo2
-          if (is.finite(vco2) && is.finite(vo2) && vo2 > 0) self$RQ <- vco2/vo2
-        }
-      }
-      
-      # --- Initial targets & states with fallback values ---
-      # Use default VCO2 if not available from metabolic system
+      # Seed defaults
       if (is.na(self$last_vco2_ml_min)) {
-        # Calculate default VCO2 from RQ and estimated VO2
-        default_vo2 <- 250  # mL/min for typical adult
-        self$last_vco2_ml_min <- default_vo2 * self$RQ
+        self$last_vco2_ml_min <- 250 * self$RQ  # default VO2=250 → VCO2 via RQ
       }
-      
       self$compute_targets()
       
-      # Initialize current states to targets if not set
-      if (is.na(self$PACO2) && is.finite(self$target_paco2)) {
-        self$PACO2 <- self$target_paco2
-      }
-      if (is.na(self$alveolar_po2) && is.finite(self$target_pao2)) {
-        self$alveolar_po2 <- self$target_pao2
-      }
-      
-      # Initialize PaO2 based on PAO2 and pathophysiology
-      if (is.finite(self$alveolar_po2)) {
-        self$arterial_o2 <- self$compute_arterial_po2(self$alveolar_po2)
-      }
-      
-      # If we still don't have valid CO2 values, use baseline
+      if (is.na(self$PACO2) && is.finite(self$target_paco2)) self$PACO2 <- self$target_paco2
+      if (is.na(self$alveolar_po2) && is.finite(self$target_pao2)) self$alveolar_po2 <- self$target_pao2
+      if (is.finite(self$alveolar_po2)) self$arterial_o2 <- self$compute_arterial_po2(self$alveolar_po2)
       if (is.na(self$PACO2)) self$PACO2 <- self$PaCO2
       if (is.na(self$target_paco2)) self$target_paco2 <- self$PaCO2
       
       if (is.null(self$node_id)) {
-        # Give lungs a predictable scope on the bus
         base <- if (!is.null(self$patient) && !is.null(self$patient$name)) self$patient$name else "patient"
         self$node_id <- paste0(base, ".lungs")
       }
@@ -182,142 +146,194 @@ Lungs <- R6Class(
       self$publish_outputs()
     },
     
-    # ---------- Targets (combined function) ----------
+    # --- plug/unplug inspired gas source ---
+    set_gas_source = function(src) { self$gas_source <- src; invisible(TRUE) },
+    clear_gas_source = function()   { self$gas_source <- NULL; invisible(TRUE) },
+    
+    # pull FiO2 + volatiles (and any other ambient gases) from local gas_source
+    pull_from_gas_source = function() {
+      if (is.null(self$gas_source)) return(invisible())
+      
+      # 1) Ambient non-volatile fractions (if provided)
+      #    Design: any of these getters are optional.
+      if (is.function(self$gas_source$get_fio2)) {
+        self$last_fio2 <- as.numeric(self$gas_source$get_fio2())
+      }
+      # You can later read others similarly if/when you use them:
+      # if (is.function(self$gas_source$get_fin2o))  self$last_fin2o  <- as.numeric(self$gas_source$get_fin2o())
+      # if (is.function(self$gas_source$get_fico2))  self$last_fico2  <- as.numeric(self$gas_source$get_fico2())
+      # if (is.function(self$gas_source$get_co))     self$last_fico   <- as.numeric(self$gas_source$get_co())
+      
+      # 2) Volatile agents
+      if (is.function(self$gas_source$get_current_fi_agents)) {
+        val <- self$gas_source$get_current_fi_agents()
+        if (is.list(val) && length(val)) {
+          self$Fi_agents <- lapply(val, as.numeric)
+          # make sure downstream stages exist
+          for (ag in names(self$Fi_agents)) {
+            if (is.null(self$FA_agents[[ag]])) self$FA_agents[[ag]] <- 0.0
+            if (is.null(self$Fa_agents[[ag]])) self$Fa_agents[[ag]] <- 0.0
+            if (is.null(self$Pa_agents[[ag]])) self$Pa_agents[[ag]] <- 0.0
+          }
+        } else {
+          # no agents from source -> keep (or clear) Fi_agents; choose to clear to avoid “residual rise”
+          self$Fi_agents <- list()
+        }
+      }
+      invisible(TRUE)
+    },
+      
+    # ---------- Targets (O2/CO2) ----------
     compute_targets = function() {
       self$compute_co2_target()
       self$compute_o2_target()
       invisible(TRUE)
     },
     
-    # CO2: PACO2 target from VCO2 and alveolar ventilation VA
     compute_co2_target = function() {
-      vco2 <- self$last_vco2_ml_min
-      VA   <- self$VA_L_min
-      
+      vco2 <- self$last_vco2_ml_min; VA <- self$VA_L_min
       if (!is.finite(vco2) || !is.finite(VA) || VA <= 0) {
-        # Keep existing target if we can't compute a new one
-        if (is.na(self$target_paco2)) {
-          self$target_paco2 <- self$PaCO2  # fallback to current arterial value
-        }
+        if (is.na(self$target_paco2)) self$target_paco2 <- self$PaCO2
         return(invisible(FALSE))
       }
-      
-      self$target_paco2 <- self$K_CO2 * (vco2 / VA)   # mmHg
+      self$target_paco2 <- self$K_CO2 * (vco2 / VA)
       invisible(TRUE)
     },
     
-    # O2: PAO2 target from FiO2 and PaCO2 (alveolar gas equation)
     compute_o2_target = function() {
       fio2 <- self$last_fio2
-      if (is.na(fio2)) {
-        # Keep existing target if we can't compute a new one
-        return(invisible(FALSE))
-      }
+      if (is.na(fio2)) return(invisible(FALSE))
       if (fio2 > 1) fio2 <- fio2 / 100
       self$target_pao2 <- (self$PB - self$PH2O) * fio2 - (self$PaCO2 / self$RQ)
       invisible(TRUE)
     },
     
-    # Calculate arterial PO2 from alveolar PO2 considering pathophysiology
     compute_arterial_po2 = function(pao2_alv) {
       if (!is.finite(pao2_alv)) return(NA_real_)
-      
-      # Start with ideal alveolar PO2
-      pao2_ideal <- pao2_alv
-      
-      # Apply shunt effect (mixing with venous blood)
-      # Simplified shunt equation: PaO2 ≈ PAO2 * (1 - Qs/Qt) + PvO2 * (Qs/Qt)
-      # Assuming mixed venous PO2 (PvO2) around 40 mmHg
-      pvo2_mixed_venous <- 40  # mmHg
-      pao2_with_shunt <- pao2_ideal * (1 - self$shunt_fraction) + pvo2_mixed_venous * self$shunt_fraction
-      
-      # Apply V/Q mismatch effect
-      # V/Q mismatch reduces oxygen transfer efficiency
-      vq_efficiency <- 1 - self$vq_mismatch * 0.3  # 30% max reduction
-      pao2_with_vq <- pao2_with_shunt * vq_efficiency
-      
-      # Apply compliance factor (affects ventilation effectiveness)
-      # Reduced compliance (stiff lungs) reduces gas exchange efficiency
-      compliance_efficiency <- 0.7 + 0.3 * self$compliance_factor  # 70-100% efficiency
-      pao2_final <- pao2_with_vq * compliance_efficiency
-      
-      # Ensure PaO2 doesn't go below physiological minimum
-      pao2_final <- max(pao2_final, 30)  # minimum ~30 mmHg
-      
-      return(pao2_final)
+      pvo2 <- 40
+      shunt_mix <- pao2_alv * (1 - self$shunt_fraction) + pvo2 * self$shunt_fraction
+      vq_eff <- 1 - self$vq_mismatch * 0.3
+      comp_eff <- 0.7 + 0.3 * self$compliance_factor
+      max(30, shunt_mix * vq_eff * comp_eff)
     },
     
     # ---------- Tick ----------
     update = function(dt = 1) {
-      # 1) Recompute targets (VCO2/VA may have changed)
+      # 0) Always pull the fresh inspired gas picture from the configured source
+      self$pull_from_gas_source()
+      
+      # 1) O2/CO2 dynamics
       self$compute_targets()
       
-      # 2) Alveolar CO2 relaxes toward target
       if (is.finite(self$target_paco2)) {
-        alpha_co2_alv <- 1 - exp(-dt / max(self$tau_co2_alv_sec, 1e-6))
+        a_alv <- 1 - exp(-dt / max(self$tau_co2_alv_sec, 1e-6))
         if (is.na(self$PACO2)) self$PACO2 <- self$target_paco2
-        self$PACO2 <- self$PACO2 + (self$target_paco2 - self$PACO2) * alpha_co2_alv
+        self$PACO2 <- self$PACO2 + (self$target_paco2 - self$PACO2) * a_alv
       }
-      
-      # 3) Arterial PaCO2 approaches PACO2 with a shorter time constant
       if (is.finite(self$PACO2)) {
-        alpha_blood <- 1 - exp(-dt / max(self$tau_co2_blood_sec, 1e-6))
-        self$PaCO2 <- self$PaCO2 + (self$PACO2 - self$PaCO2) * alpha_blood
+        a_bld <- 1 - exp(-dt / max(self$tau_co2_blood_sec, 1e-6))
+        self$PaCO2 <- self$PaCO2 + (self$PACO2 - self$PaCO2) * a_bld
       }
       
-      # 4) Recompute O2 target using updated PaCO2, then relax O2 toward target
       self$compute_o2_target()
       if (is.finite(self$target_pao2)) {
-        alpha_o2 <- 1 - exp(-dt / max(self$tau_seconds, 1e-6))
+        a_o2 <- 1 - exp(-dt / max(self$tau_seconds, 1e-6))
         if (is.na(self$alveolar_po2)) self$alveolar_po2 <- self$target_pao2
-        self$alveolar_po2 <- self$alveolar_po2 + (self$target_pao2 - self$alveolar_po2) * alpha_o2
+        self$alveolar_po2 <- self$alveolar_po2 + (self$target_pao2 - self$alveolar_po2) * a_o2
       }
-      
-      # 5) Update arterial PO2 based on current alveolar PO2 and pathophysiology
       if (is.finite(self$alveolar_po2)) {
-        target_arterial_po2 <- self$compute_arterial_po2(self$alveolar_po2)
-        if (is.finite(target_arterial_po2)) {
-          # Arterial PO2 approaches target with similar dynamics to alveolar
-          alpha_arterial <- 1 - exp(-dt / max(self$tau_seconds * 1.2, 1e-6))  # slightly slower than alveolar
-          if (is.na(self$arterial_o2)) self$arterial_o2 <- target_arterial_po2
-          self$arterial_o2 <- self$arterial_o2 + (target_arterial_po2 - self$arterial_o2) * alpha_arterial
+        target_paO2 <- self$compute_arterial_po2(self$alveolar_po2)
+        if (is.finite(target_paO2)) {
+          a_pa <- 1 - exp(-dt / max(self$tau_seconds * 1.2, 1e-6))
+          if (is.na(self$arterial_o2)) self$arterial_o2 <- target_paO2
+          self$arterial_o2 <- self$arterial_o2 + (target_paO2 - self$arterial_o2) * a_pa
         }
       }
       
-      if (is.finite(self$Fi_agent)) {
-        alpha_a <- 1 - exp(-dt / max(self$tau_agent_sec, 1e-6))
-        if (is.na(self$Fa_agent)) self$Fa_agent <- self$Fi_agent
-        self$Fa_agent <- self$Fa_agent + (self$Fi_agent - self$Fa_agent) * alpha_a
-      }
+      # 2) Volatile multi-stage dynamics
+      self$update_volatile_agents(dt)
       
       self$publish_outputs()
       invisible(TRUE)
     },
     
-    # ---------- Publishing ----------
-    publish_outputs = function() {
-      # Publish under lungs scope (safe helper handles either self$set_param or bus$set_param)
-      self$set_local_param("alveolar_po2", self$alveolar_po2, notify = TRUE)
-      self$set_local_param("arterial_o2",  self$arterial_o2,  notify = TRUE)
-      self$set_local_param("PACO2",        self$PACO2,        notify = TRUE)
-      self$set_local_param("PaCO2",        self$PaCO2,        notify = TRUE)
-      self$set_local_param("RQ",           self$RQ,           notify = TRUE)
-      self$set_local_param("target_paco2", self$target_paco2, notify = TRUE)
-      self$set_local_param("target_pao2",  self$target_pao2,  notify = TRUE)
-      self$set_local_param("Fi_agent",     self$Fi_agent,     notify = TRUE)
-      self$set_local_param("Fa_agent",     self$Fa_agent,     notify = TRUE)
-      if (tolower(self$current_agent) == "sevoflurane") {
-        self$set_local_param("Fa_sevo", self$Fa_agent, notify = TRUE)
+    # ---------- Volatiles: Fi -> FA -> Fa -> Pa ----------
+    update_volatile_agents = function(dt) {
+      # 1) read incoming Fi from gas_source (may be NULL/empty)
+      incoming <- list()
+      if (!is.null(self$gas_source) && is.function(self$gas_source$get_current_fi_agents)) {
+        val <- self$gas_source$get_current_fi_agents()
+        if (is.list(val) && length(val)) incoming <- lapply(val, as.numeric)
       }
       
-      # Back-compat mirror under patient scope (only if bus + patient available)
-      if (isTRUE(self$mirror_to_patient_scope) && !is.null(self$bus) &&
-          !is.null(self$patient) && !is.null(self$patient$node_id)) {
-        self$bus$set_param(self$patient$node_id, "alveolar_po2", self$alveolar_po2, notify = TRUE)
-        self$bus$set_param(self$patient$node_id, "arterial_o2",  self$arterial_o2,  notify = TRUE)
-        self$bus$set_param(self$patient$node_id, "PaCO2",        self$PaCO2,        notify = TRUE)
-        self$bus$set_param(self$patient$node_id, "PACO2",        self$PACO2,        notify = TRUE)
+      # 2) set coefficients
+      a_fi <- 1 - exp(-dt / max(self$tau_agent_fi_sec, 1e-6))
+      a_fa <- 1 - exp(-dt / max(self$tau_agent_fa_sec, 1e-6))
+      a_pa <- 1 - exp(-dt / max(self$tau_agent_pa_sec, 1e-6))
+      
+      # 3) make sure we keep updating agents that were present before
+      prev_agents <- unique(c(
+        names(self$Fi_agents), names(self$FA_agents),
+        names(self$Fa_agents), names(self$Pa_agents)
+      ))
+      all_agents <- unique(c(prev_agents, names(incoming)))
+      
+      # 4) update per agent (use Fi=0 if not present)
+      for (ag in all_agents) {
+        Fi <- as.numeric(incoming[[ag]] %||% 0)
+        FA <- as.numeric(self$FA_agents[[ag]] %||% 0)
+        Fa <- as.numeric(self$Fa_agents[[ag]] %||% 0)
+        Pa <- as.numeric(self$Pa_agents[[ag]] %||% 0)
+        
+        # Stage 1: proximal/airway low-pass toward Fi
+        FA <- FA + (Fi - FA) * a_fi; self$FA_agents[[ag]] <- FA
+        # Stage 2: alveolar toward FA
+        Fa <- Fa + (FA - Fa) * a_fa; self$Fa_agents[[ag]] <- Fa
+        # Stage 3: arterial toward Fa
+        Pa <- Pa + (Fa - Pa) * a_pa; self$Pa_agents[[ag]] <- Pa
       }
+      
+      # 5) store the latest delivered Fi (for observability)
+      self$Fi_agents <- incoming
+      
+      invisible(TRUE)
+    },
+    
+    # update_volatile_agents = function(dt) {
+    #   if (!length(self$Fi_agents)) return(invisible())
+    #   a_fi <- 1 - exp(-dt / max(self$tau_agent_fi_sec, 1e-6))
+    #   a_fa <- 1 - exp(-dt / max(self$tau_agent_fa_sec, 1e-6))
+    #   a_pa <- 1 - exp(-dt / max(self$tau_agent_pa_sec, 1e-6))
+    #   
+    #   for (ag in names(self$Fi_agents)) {
+    #     Fi <- as.numeric(self$Fi_agents[[ag]] %||% 0)
+    #     FA <- as.numeric(self$FA_agents[[ag]] %||% 0)
+    #     Fa <- as.numeric(self$Fa_agents[[ag]] %||% 0)
+    #     Pa <- as.numeric(self$Pa_agents[[ag]] %||% 0)
+    #     
+    #     FA <- FA + (Fi - FA) * a_fi; self$FA_agents[[ag]] <- FA
+    #     Fa <- Fa + (FA - Fa) * a_fa; self$Fa_agents[[ag]] <- Fa
+    #     Pa <- Pa + (Fa - Pa) * a_pa; self$Pa_agents[[ag]] <- Pa
+    #   }
+    #   invisible(TRUE)
+    # },
+
+    # ---------- Publishing ----------
+    publish_outputs = function() {
+      # O2/CO2
+      self$set_local_param("alveolar_po2", self$alveolar_po2, TRUE)
+      self$set_local_param("arterial_o2",  self$arterial_o2,  TRUE)
+      self$set_local_param("PACO2",        self$PACO2,        TRUE)
+      self$set_local_param("PaCO2",        self$PaCO2,        TRUE)
+      self$set_local_param("RQ",           self$RQ,           TRUE)
+      self$set_local_param("target_paco2", self$target_paco2, TRUE)
+      self$set_local_param("target_pao2",  self$target_pao2,  TRUE)
+      
+      # Volatiles
+      self$set_local_param("Fi_agents", self$Fi_agents, TRUE)   # delivered target (Y-piece)
+      self$set_local_param("FA_agents", self$FA_agents, TRUE)   # airway/proximal
+      self$set_local_param("Fa_agents", self$Fa_agents, TRUE)   # alveolar
+      self$set_local_param("Pa_agents", self$Pa_agents, TRUE)   # arterial (optional)
       
       invisible(TRUE)
     },
@@ -325,25 +341,28 @@ Lungs <- R6Class(
     get_state = function() {
       list(
         alveolar_po2 = self$alveolar_po2,
-        arterial_o2  = self$arterial_o2,   # PaO2
+        arterial_o2  = self$arterial_o2,
         target_pao2  = self$target_pao2,
         PACO2        = self$PACO2,
         target_paco2 = self$target_paco2,
         PaCO2        = self$PaCO2,
         RQ           = self$RQ,
         VA_L_min     = self$VA_L_min,
-        tau_seconds = self$tau_seconds,
-        tau_co2_alv_sec = self$tau_co2_alv_sec,
+        tau_seconds  = self$tau_seconds,
+        tau_co2_alv_sec   = self$tau_co2_alv_sec,
         tau_co2_blood_sec = self$tau_co2_blood_sec,
-        shunt_fraction = self$shunt_fraction,
-        vq_mismatch = self$vq_mismatch,
+        shunt_fraction    = self$shunt_fraction,
+        vq_mismatch       = self$vq_mismatch,
         compliance_factor = self$compliance_factor,
-        last_fio2    = self$last_fio2,
-        last_vco2_ml_min = self$last_vco2_ml_min,
-        last_vo2_ml_min  = self$last_vo2_ml_min,
-        Fi_agent = self$Fi_agent,
-        Fa_agent = self$Fa_agent,
-        Fa_sevo  = if (tolower(self$current_agent)=="sevoflurane") self$Fa_agent else NA_real_
+        last_fio2         = self$last_fio2,
+        last_vco2_ml_min  = self$last_vco2_ml_min,
+        last_vo2_ml_min   = self$last_vo2_ml_min,
+        
+        # Volatiles
+        Fi_agents = self$Fi_agents,
+        FA_agents = self$FA_agents,
+        Fa_agents = self$Fa_agents,
+        Pa_agents = self$Pa_agents
       )
     }
   )

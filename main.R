@@ -5,12 +5,16 @@ library(jsonlite)
 library(yaml)
 library(httpuv)
 
-setwd("~/Library/CloudStorage/GoogleDrive-basar.erdivanli@erdogan.edu.tr/My Drive/R/Deneme")
+reset <- function() {
+  engine$stop_simulation()
+  engine$shutdown()
+  engine <- NULL
+}
 
+setwd("~/Library/CloudStorage/GoogleDrive-basar.erdivanli@erdogan.edu.tr/My Drive/R/Deneme")
 `%||%` <- function(a, b) if (is.null(a)) b else a
 
-engine$finalize()
-engine <- NULL
+reset()
 
 model_files  <- list.files("models", pattern="\\.R$", full.names=TRUE)
 for (f in model_files) {
@@ -23,3 +27,28 @@ engine <- SimulationEngine$new(
   step_interval = 1.0,
   http_port = 8080
 )
+
+engine$machine$vaporizer_bank$open_vaporizer("sevoflurane")
+engine$machine$vaporizer_bank$vaporizers$sevoflurane$vaporizer_setting <- 2
+engine$start_simulation()
+
+engine$disconnect_patient_to_room_air()                     # breathing room air
+engine$connect_patient_to_machine_manual_mask(mask_seal=0.2) # preoxygenation, leaky mask
+engine$machine$set_o2_flow(6)                                # 6 L/min O2
+# later: improve seal, support breaths
+engine$connect_patient_to_machine_manual_mask(mask_seal=0.8)
+
+# induce, then switch to controlled ventilation (ETT in place)
+engine$connect_patient_to_machine_controlled()
+engine$machine$vaporizer_bank$open_vaporizer("sevoflurane")
+engine$machine$set_vaporizer_setting("sevoflurane", 2)
+
+engine$machine$vaporizer_bank$get_current_fi_agents()
+engine$patient$systems$respiratory$get_fi("sevoflurane")
+engine$patient$systems$respiratory$get_fA("sevoflurane")
+engine$patient$systems$respiratory$get_Pa("sevoflurane")
+engine$patient$systems$respiratory$Fi_agents
+
+engine$machine$close_vaporizer("sevoflurane")
+
+

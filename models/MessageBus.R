@@ -40,7 +40,7 @@ MessageBus <- R6Class(
       if (exists(key, envir = private$params, inherits = FALSE))
         get(key, envir = private$params, inherits = FALSE) else default
     },
-    # NEW: Get all parameters for a scope
+    # Get all parameters for a scope
     get_state = function(scope) {
       if (is.null(scope)) return(NULL)
       
@@ -86,6 +86,33 @@ MessageBus <- R6Class(
       }
       rownames(df) <- NULL
       df
+    }
+  ),
+  # Add active binding for state access
+  active = list(
+    state = function() {
+      # Return all parameters organized by scope
+      all_keys <- ls(private$params, all.names = TRUE)
+      
+      if (length(all_keys) == 0) return(list())
+      
+      # Parse scope::name format
+      scopes <- list()
+      for (key in all_keys) {
+        parts <- strsplit(key, "::", fixed = TRUE)[[1]]
+        if (length(parts) == 2) {
+          scope_name <- parts[1]
+          param_name <- parts[2]
+          value <- get(key, envir = private$params, inherits = FALSE)
+          
+          if (is.null(scopes[[scope_name]])) {
+            scopes[[scope_name]] <- list()
+          }
+          scopes[[scope_name]][[param_name]] <- value
+        }
+      }
+      
+      scopes
     }
   ),
   private = list(subs = NULL, next_id = 0L, retained = NULL, params = NULL)

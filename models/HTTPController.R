@@ -1,3 +1,5 @@
+# Fixed HTTPController with stack overflow prevention and better R6 handling
+
 HTTPController <- R6Class(
   "HTTPController",
   public = list(
@@ -79,7 +81,6 @@ HTTPController <- R6Class(
         if (length(remaining_path) && identical(remaining_path[1], "device")) {
           remaining_path <- remaining_path[-1]
         }
-        # Fixed: Use navigate_object for GET requests, not set_nested_value
         return(self$navigate_object(self$simulation_engine$machine, remaining_path))
       } else if (root_type == "simulation") {
         # Special case for simulation metadata
@@ -139,16 +140,11 @@ HTTPController <- R6Class(
         return(list(success = FALSE, message = "simulation_engine is NULL"))
       }
       
-      cat("Debug: simulation_engine class:", class(self$simulation_engine), "\n")
-      cat("Debug: available methods:", paste(names(self$simulation_engine), collapse = ", "), "\n")
-      
       tryCatch({
         if (command == "start") {
-          cat("Debug: Attempting to call start_simulation\n")
           # Try direct access to the method
           start_method <- self$simulation_engine$start_simulation
           if (is.function(start_method)) {
-            cat("Debug: start_simulation is a function, calling it\n")
             start_method()
             return(list(success = TRUE, message = "Simulation started"))
           } else {
@@ -179,22 +175,103 @@ HTTPController <- R6Class(
         return(list(success = FALSE, message = paste("Unknown simulation command:", command)))
         
       }, error = function(e) {
-        cat("Debug: Error in handle_simulation_control:", e$message, "\n")
         return(list(success = FALSE, message = paste("Error executing command:", e$message)))
       })
     },
     
-    navigate_object = function(obj, path_parts) {
-      if (!length(path_parts)) return(obj)
-      key <- path_parts[1]; rest <- path_parts[-1]
+    # FIXED: Safe navigation with recursion depth limit and simple cycle detection
+    navigate_object = function(obj, path_parts, depth = 0, max_depth = 10) {
+      # Prevent stack overflow with depth limit
+      if (depth > max_depth) {
+        return(list(error = "Maximum navigation depth exceeded"))
+      }
       
-      if (is.R6(obj) || is.list(obj)) {
+      # If no more path parts, return the current object (but safely serialize it)
+      if (!length(path_parts)) {
+        return(self$safe_serialize_object(obj, depth))
+      }
+      
+      key <- path_parts[1]
+      rest <- path_parts[-1]
+      
+      if (is.R6(obj)) {
+        # For R6 objects, check if the key exists in public fields
+        if (key %in% names(obj)) {
+          next_obj <- tryCatch(obj[[key]], error = function(e) NULL)
+          if (!is.null(next_obj)) {
+            if (!length(rest)) {
+              return(self$safe_serialize_object(next_obj, depth + 1))
+            }
+            return(self$navigate_object(next_obj, rest, depth + 1))
+          }
+        }
+        
+        # Check if it's a method we should not navigate into
+        if (key %in% c("clone", "initialize", ".__enclos_env__")) {
+          return(NULL)
+        }
+        
+        return(NULL)
+      } else if (is.list(obj)) {
         if (!(key %in% names(obj))) return(NULL)
         next_obj <- obj[[key]]
-        if (!length(rest)) return(next_obj)
-        return(self$navigate_object(next_obj, rest))
+        if (!length(rest)) {
+          return(self$safe_serialize_object(next_obj, depth + 1))
+        }
+        return(self$navigate_object(next_obj, rest, depth + 1))
       }
+      
       NULL
+    },
+    
+    # ADDED: Safe object serialization to prevent stack overflow in JSON conversion
+    safe_serialize_object = function(obj, depth = 0, max_depth = 5) {
+      if (depth > max_depth) {
+        return(paste("Object too deep (", class(obj)[1], ")"))
+      }
+      
+      if (is.null(obj)) return(NULL)
+      if (is.atomic(obj) && length(obj) <= 100) return(obj)  # Limit large vectors
+      if (is.function(obj)) return("function")
+      
+      if (is.R6(obj)) {
+        # For R6 objects, return a summary instead of full object to prevent recursion
+        result <- list()
+        pub_names <- names(obj)
+        
+        # Only include safe, non-function fields
+        safe_fields <- setdiff(pub_names, c("clone", "initialize", ".__enclos_env__"))
+        safe_fields <- head(safe_fields, 30)  # Limit number of fields
+        
+        for (nm in safe_fields) {
+          val <- tryCatch(obj[[nm]], error = function(e) paste("Error:", e$message))
+          
+          if (is.function(val)) {
+            result[[nm]] <- "function"
+          } else if (is.atomic(val) && length(val) <= 10) {
+            result[[nm]] <- val
+          } else if (is.list(val) && length(val) <= 20 && depth < max_depth) {
+            result[[nm]] <- self$safe_serialize_object(val, depth + 1)
+          } else if (is.R6(val)) {
+            result[[nm]] <- paste("R6 object:", class(val)[1])
+          } else {
+            result[[nm]] <- paste("Complex object:", class(val)[1], "length:", length(val))
+          }
+        }
+        return(result)
+      }
+      
+      if (is.list(obj) && length(obj) <= 50) {  # Limit large lists
+        result <- list()
+        obj_names <- head(names(obj), 25)  # Limit items shown
+        for (name in obj_names) {
+          result[[name]] <- self$safe_serialize_object(obj[[name]], depth + 1)
+        }
+        return(result)
+      }
+      
+      # Fallback for other object types
+      paste("Object:", class(obj)[1], "length:", length(obj))
     },
     
     set_nested_value = function(obj, path_parts, value) {
@@ -244,6 +321,11 @@ HTTPController <- R6Class(
         val <- if (is.list(value) && "value" %in% names(value)) value$value else value
         
         if (R6::is.R6(obj)) {
+          # Check if it's a systems collection (like in Patient)
+          if (key == "systems" && is.list(obj$systems)) {
+            return(list(obj = obj, result = list(success = FALSE, message = "Cannot directly modify systems collection")))
+          }
+          
           # Special handling for methods that need parameters
           if (key %in% names(obj) && is.function(obj[[key]])) {
             # Get the function to check its parameters
@@ -267,11 +349,15 @@ HTTPController <- R6Class(
             return(list(obj = obj, result = list(success = TRUE, message = paste("Called", key, "with", val))))
           } else {
             # Direct field assignment - ensure we keep numeric types
-            if (is.numeric(obj[[key]]) && is.character(val)) {
-              val <- as.numeric(val)
+            if (key %in% names(obj)) {
+              if (is.numeric(obj[[key]]) && is.character(val)) {
+                val <- as.numeric(val)
+              }
+              obj[[key]] <- val
+              return(list(obj = obj, result = list(success = TRUE, message = paste("Set", key, "to", val))))
+            } else {
+              return(list(obj = obj, result = list(success = FALSE, message = paste("Field", key, "not found in", class(obj)[1]))))
             }
-            obj[[key]] <- val
-            return(list(obj = obj, result = list(success = TRUE, message = paste("Set", key, "to", val))))
           }
         }
         
@@ -292,10 +378,29 @@ HTTPController <- R6Class(
         return(list(obj = obj, result = list(success = FALSE, message = "Invalid path")))
       }
       
+      # For R6 objects, check systems collection
+      if (R6::is.R6(obj) && key == "systems") {
+        if (length(rest) > 0) {
+          system_name <- rest[1]
+          if (system_name %in% names(obj$systems)) {
+            child <- obj$systems[[system_name]]
+            res <- self$set_nested_value(child, rest[-1], value)
+            # Don't reassign systems - R6 objects are by reference
+            return(list(obj = obj, result = res$result))
+          } else {
+            return(list(obj = obj, result = list(success = FALSE, message = paste("System", system_name, "not found"))))
+          }
+        }
+      }
+      
       # ensure child exists for lists
       if (is.list(obj) && !(key %in% names(obj))) obj[[key]] <- list()
       
       child <- if (R6::is.R6(obj) || is.list(obj)) obj[[key]] else NULL
+      if (is.null(child)) {
+        return(list(obj = obj, result = list(success = FALSE, message = paste("Cannot navigate to", key))))
+      }
+      
       res   <- self$set_nested_value(child, rest, value)
       
       # write back child if list
@@ -304,76 +409,115 @@ HTTPController <- R6Class(
       return(list(obj = obj, result = res$result))
     },
     
-    # Generate API documentation based on current config
+    # FIXED: Generate API documentation with stack overflow prevention
     handle_root_request = function() {
-      available_endpoints <- list(
-        patient = self$get_available_paths(self$simulation_engine$patient, "patient"),
-        machine = self$get_available_paths(self$simulation_engine$machine, "machine"),
-        simulation = list(
-          "simulation/start (POST)",
-          "simulation/stop (POST)", 
-          "simulation/step_interval (GET/POST)",
-          "simulation (GET) - status"
-        )
-      )
-      
-      return(list(
-        status = 200L,
-        headers = list("Content-Type" = "application/json"),
-        body = jsonlite::toJSON(list(
-          message = "Generic Simulation API",
-          available_endpoints = available_endpoints,
-          usage = list(
-            "GET /{path} - retrieve value at path",
-            "POST /{path} - set value at path (send {\"value\": new_value})"
+      tryCatch({
+        available_endpoints <- list(
+          patient = self$get_available_paths_safe(self$simulation_engine$patient, "patient"),
+          machine = self$get_available_paths_safe(self$simulation_engine$machine, "machine"),
+          simulation = list(
+            "simulation/start (POST)",
+            "simulation/stop (POST)", 
+            "simulation/step_interval (GET/POST)",
+            "simulation (GET) - status"
           )
-        ), pretty = TRUE, auto_unbox = TRUE)
-      ))
+        )
+        
+        return(list(
+          status = 200L,
+          headers = list("Content-Type" = "application/json"),
+          body = jsonlite::toJSON(list(
+            message = "Generic Simulation API",
+            available_endpoints = available_endpoints,
+            usage = list(
+              "GET /{path} - retrieve value at path",
+              "POST /{path} - set value at path (send {\"value\": new_value})"
+            )
+          ), pretty = TRUE, auto_unbox = TRUE)
+        ))
+      }, error = function(e) {
+        return(list(
+          status = 500L,
+          headers = list("Content-Type" = "application/json"),
+          body = jsonlite::toJSON(list(error = paste("Error generating documentation:", e$message)))
+        ))
+      })
     },
     
-    # Recursively discover available paths in config
-    get_available_paths = function(obj, prefix = "") {
-      # If it’s an R6 object, enumerate public members
-      if (inherits(obj, "R6")) {
+    # FIXED: Safe path discovery with depth protection
+    get_available_paths_safe = function(obj, prefix = "", depth = 0, max_depth = 3) {
+      if (depth > max_depth) {
+        return(paste(prefix, "(max depth reached)"))
+      }
+      
+      if (is.null(obj)) {
+        return(paste(prefix, "(null)"))
+      }
+      
+      # Handle R6 objects
+      if (is.R6(obj)) {
         paths <- list()
         pub_names <- names(obj)
-        for (nm in pub_names) {
-          # Skip R6 internals
-          if (nm %in% c("clone", ".__enclos_env__")) next
+        
+        # Limit number of fields to prevent excessive output
+        safe_names <- setdiff(pub_names, c("clone", "initialize", ".__enclos_env__"))
+        safe_names <- head(safe_names, 15)  # Limit to first 15 fields
+        
+        for (nm in safe_names) {
           current_path <- if (prefix == "") nm else paste0(prefix, "/", nm)
-          val <- tryCatch(obj[[nm]], error = function(e) NULL)
           
-          if (is.list(val) || inherits(val, "R6")) {
-            nested <- self$get_available_paths(val, current_path)
-            if (is.list(nested)) paths <- c(paths, nested) else paths[[length(paths)+1]] <- nested
+          val <- tryCatch(obj[[nm]], error = function(e) NULL)
+          if (is.null(val)) next
+          
+          if (is.function(val)) {
+            paths[[length(paths) + 1]] <- paste0(current_path, " (function)")
+          } else if (is.atomic(val) && length(val) <= 5) {
+            paths[[length(paths) + 1]] <- paste0(current_path, " (", class(val)[1], ")")
+          } else if ((is.list(val) || is.R6(val)) && depth < max_depth) {
+            nested <- self$get_available_paths_safe(val, current_path, depth + 1)
+            if (is.list(nested) && length(nested) > 0) {
+              paths <- c(paths, nested)
+            } else if (is.character(nested)) {
+              paths[[length(paths) + 1]] <- nested
+            }
           } else {
-            # leaf: show its class
             paths[[length(paths) + 1]] <- paste0(current_path, " (", class(val)[1], ")")
           }
+          
+          # Prevent too many paths
+          if (length(paths) > 40) break
         }
         return(paths)
       }
       
-      # If it’s a plain list, recurse as before
+      # Handle lists
       if (is.list(obj)) {
         paths <- list()
-        for (name in names(obj)) {
+        obj_names <- head(names(obj), 10)  # Limit list exploration
+        
+        for (name in obj_names) {
           current_path <- if (prefix == "") name else paste0(prefix, "/", name)
-          if (is.list(obj[[name]]) || inherits(obj[[name]], "R6")) {
-            nested_paths <- self$get_available_paths(obj[[name]], current_path)
-            if (is.list(nested_paths)) {
-              paths <- c(paths, nested_paths)
+          if (is.list(obj[[name]]) || is.R6(obj[[name]])) {
+            if (depth < max_depth) {
+              nested_paths <- self$get_available_paths_safe(obj[[name]], current_path, depth + 1)
+              if (is.list(nested_paths)) {
+                paths <- c(paths, nested_paths)
+              } else {
+                paths[[length(paths) + 1]] <- nested_paths
+              }
             } else {
-              paths[[length(paths) + 1]] <- nested_paths
+              paths[[length(paths) + 1]] <- paste0(current_path, " (", class(obj[[name]])[1], " - max depth)")
             }
           } else {
             paths[[length(paths) + 1]] <- paste0(current_path, " (", class(obj[[name]])[1], ")")
           }
+          
+          if (length(paths) > 40) break
         }
         return(paths)
       }
       
-      # Fallback: leaf
+      # Fallback
       paste0(prefix, " (", class(obj)[1], ")")
     }
   )
