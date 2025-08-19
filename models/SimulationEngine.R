@@ -251,33 +251,36 @@ SimulationEngine <- R6Class(
       private$finalize()
     },
     
-    connect_patient_to_machine_manual_mask = function(mask_seal = 0.3) {
-      mm <- DatexManualMask$new(self$machine, mask_seal = mask_seal)
-      # you may want to sync demand from patient lungs:
-      lungs <- self$patient$systems$respiratory$organs$lungs
-      mm$patient_minute_vent_L_min <- lungs$VA_L_min * 1.2  # rough total MV vs alveolar
-      self$patient$systems$respiratory$set_gas_source(mm)
+    connect_patient_to_machine_manual_mask = function(mask_seal = 0.3, mv_L_min = NULL) {
+      m <- DatexModeManualMask$new(mask_seal = mask_seal)
+      if (!is.null(mv_L_min)) m$patient_minute_vent_L_min <- mv_L_min
+      else {
+        lungs <- self$patient$systems$respiratory$organs$lungs
+        m$patient_minute_vent_L_min <- lungs$VA_L_min * 1.2
+      }
+      self$machine$set_mode(m)
+      self$patient$systems$respiratory$set_gas_source(self$machine)
       invisible(TRUE)
     },
     
     connect_patient_to_machine_controlled = function() {
-      # simplest: lungs pull directly from the machine (no dilution)
-      src <- list(
-        get_current_fi_agents = function() self$machine$vaporizer_bank$get_volatile_agent_composition(),
-        get_fio2 = function() self$machine$current_fio2
-      )
-      class(src) <- "GasSource"
-      self$patient$systems$respiratory$set_gas_source(src)
+      self$machine$set_mode(DatexModeControlled$new())
+      self$patient$systems$respiratory$set_gas_source(self$machine)
       invisible(TRUE)
     },
     
     disconnect_patient_to_room_air = function() {
-      room <- list(
-        get_current_fi_agents = function() list(),  # no agents
-        get_fio2 = function() 0.21
-      )
-      class(room) <- "GasSource"
-      self$patient$systems$respiratory$set_gas_source(room)
+      # keep machine; just make mode deliver room air (no agents)
+      room_mode <- R6::R6Class(
+        "DatexModeRoomAir", inherit = DatexMode,
+        public = list(
+          label = "room_air",
+          get_fio2 = function(machine) 0.21,
+          get_current_fi_agents = function(machine) list()
+        )
+      )$new()
+      self$machine$set_mode(room_mode)
+      self$patient$systems$respiratory$set_gas_source(self$machine)
       invisible(TRUE)
     }
   ),

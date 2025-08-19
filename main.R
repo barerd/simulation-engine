@@ -40,7 +40,7 @@ engine$patient$systems$respiratory$arterial_o2
 
 engine$connect_patient_to_machine_controlled()
 engine$machine$vaporizer_bank$open_vaporizer("sevoflurane")
-engine$machine$set_vaporizer_setting("sevoflurane", 2)
+engine$machine$set_vaporizer_setting("sevoflurane", 3)
 # engine$machine$vaporizer_bank$vaporizers$sevoflurane$vaporizer_setting <- 2
 engine$machine$vaporizer_bank$get_current_fi_agents()
 engine$patient$systems$respiratory$get_fi("sevoflurane")
