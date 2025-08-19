@@ -36,6 +36,27 @@ HTTPController <- R6Class(
         ))
       }
       
+      # fast-path: GET /machine/presets -> list available presets
+      if (length(path_parts) == 2 &&
+          identical(path_parts[1], "machine") &&
+          identical(path_parts[2], "presets")) {
+        
+        mg <- self$simulation_engine$machine
+        if (is.null(mg) || !is.function(mg$list_presets)) {
+          return(list(
+            status = 404L,
+            headers = list("Content-Type" = "application/json"),
+            body = jsonlite::toJSON(list(error = "No presets available"), auto_unbox = TRUE)
+          ))
+        }
+        names <- tryCatch(mg$list_presets(), error=function(e) character(0))
+        return(list(
+          status = 200L,
+          headers = list("Content-Type" = "application/json"),
+          body = jsonlite::toJSON(names, auto_unbox = TRUE)
+        ))
+      }
+      
       # fast-path GET /machine/flows
       if (length(path_parts) == 2 &&
           identical(path_parts[1], "machine") &&
@@ -187,57 +208,6 @@ HTTPController <- R6Class(
       })
     },
     
-    # handle_simulation_control = function(path_parts, value) {
-    #   if (length(path_parts) == 0) {
-    #     return(list(success = FALSE, message = "No simulation command specified"))
-    #   }
-    #   
-    #   command <- path_parts[1]
-    #   
-    #   # Debug: Check if simulation_engine exists and what type it is
-    #   if (is.null(self$simulation_engine)) {
-    #     return(list(success = FALSE, message = "simulation_engine is NULL"))
-    #   }
-    #   
-    #   tryCatch({
-    #     if (command == "start") {
-    #       # Try direct access to the method
-    #       start_method <- self$simulation_engine$start_simulation
-    #       if (is.function(start_method)) {
-    #         start_method()
-    #         return(list(success = TRUE, message = "Simulation started"))
-    #       } else {
-    #         return(list(success = FALSE, message = paste("start_simulation is not a function, it's:", class(start_method))))
-    #       }
-    #     } else if (command == "stop") {
-    #       stop_method <- self$simulation_engine$stop_simulation
-    #       if (is.function(stop_method)) {
-    #         stop_method()
-    #         return(list(success = TRUE, message = "Simulation stopped"))
-    #       } else {
-    #         return(list(success = FALSE, message = paste("stop_simulation is not a function, it's:", class(stop_method))))
-    #       }
-    #     } else if (command == "step_interval") {
-    #       # Handle both empty value and value with "value" key
-    #       new_value <- if (is.list(value) && "value" %in% names(value)) {
-    #         value$value
-    #       } else if (is.numeric(value)) {
-    #         value
-    #       } else {
-    #         return(list(success = FALSE, message = "step_interval requires a numeric value"))
-    #       }
-    #       
-    #       self$simulation_engine$step_interval <- as.numeric(new_value)
-    #       return(list(success = TRUE, message = paste("Set step interval to", new_value)))
-    #     }
-    #     
-    #     return(list(success = FALSE, message = paste("Unknown simulation command:", command)))
-    #     
-    #   }, error = function(e) {
-    #     return(list(success = FALSE, message = paste("Error executing command:", e$message)))
-    #   })
-    # },
-    
     handle_simulation_control = function(path_parts, value) {
       if (length(path_parts) == 0) {
         return(list(success = FALSE, message = "No simulation command specified"))
@@ -300,60 +270,117 @@ HTTPController <- R6Class(
     },
     
     # Handle concise machine commands like /machine/flows and connect/disconnect
+    # handle_machine_command = function(path_parts, post_data) {
+    #   if (length(path_parts) < 2 || !identical(path_parts[1], "machine")) return(NULL)
+    #   
+    #   cmd <- path_parts[2]
+    #   eng <- self$simulation_engine
+    #   dev <- eng$machine
+    #   
+    #   # /machine/flows  {o2, air, n2o}
+    #   if (identical(cmd, "flows")) {
+    #     o2  <- as.numeric(post_data$o2 %||% post_data$O2 %||% NA)
+    #     air <- as.numeric(post_data$air %||% NA)
+    #     n2o <- as.numeric(post_data$n2o %||% NA)
+    #     
+    #     if (is.null(dev)) return(list(success = FALSE, message = "No machine"))
+    #     if (!is.na(o2))  dev$set_o2_flow(o2)
+    #     if (!is.na(air)) dev$set_air_flow(air)
+    #     if (!is.na(n2o)) dev$set_n2o_flow(n2o)
+    #     
+    #     # nudge display immediately (it will still smooth in update)
+    #     cur <- list(
+    #       fio2  = dev$compute_fio2_from_flows(),
+    #       fin2o = dev$compute_fin2o_from_flows(),
+    #       total_fgf = dev$total_fresh_gas_flow()
+    #     )
+    #     return(c(list(success = TRUE, message = "Flows updated"), cur))
+    #   }
+    #   
+    #   # /machine/connect/controlled
+    #   if (identical(cmd, "connect") && length(path_parts) >= 3 && identical(path_parts[3], "controlled")) {
+    #     if (!is.function(eng$connect_patient_to_machine_controlled))
+    #       return(list(success = FALSE, message = "connect_patient_to_machine_controlled() not available"))
+    #     eng$connect_patient_to_machine_controlled()
+    #     return(list(success = TRUE, message = "Connected: controlled"))
+    #   }
+    #   
+    #   # /machine/connect/manual_mask  {mask_seal:?}
+    #   if (identical(cmd, "connect") && length(path_parts) >= 3 && identical(path_parts[3], "manual_mask")) {
+    #     ms <- as.numeric(post_data$mask_seal %||% 0.3)
+    #     if (!is.function(eng$connect_patient_to_machine_manual_mask))
+    #       return(list(success = FALSE, message = "connect_patient_to_machine_manual_mask() not available"))
+    #     eng$connect_patient_to_machine_manual_mask(mask_seal = ms)
+    #     return(list(success = TRUE, message = paste("Connected: manual_mask (mask_seal =", ms, ")")))
+    #   }
+    #   
+    #   # /machine/disconnect/room_air
+    #   if (identical(cmd, "disconnect") && length(path_parts) >= 3 && identical(path_parts[3], "room_air")) {
+    #     if (!is.function(eng$disconnect_patient_to_room_air))
+    #       return(list(success = FALSE, message = "disconnect_patient_to_room_air() not available"))
+    #     eng$disconnect_patient_to_room_air()
+    #     return(list(success = TRUE, message = "Disconnected to room air"))
+    #   }
+    #   
+    #   # Unknown concise command -> let generic walker handle it
+    #   return(NULL)
+    # },
+    
     handle_machine_command = function(path_parts, post_data) {
-      if (length(path_parts) < 2 || !identical(path_parts[1], "machine")) return(NULL)
+      # Returns a plain R list (content) on handled paths, or NULL if not handled.
+      # handle_post_request will wrap this into a proper HTTP response.
       
-      cmd <- path_parts[2]
-      eng <- self$simulation_engine
-      dev <- eng$machine
+      if (length(path_parts) == 0) return(NULL)
+      if (!identical(path_parts[1], "machine")) return(NULL)
       
-      # /machine/flows  {o2, air, n2o}
-      if (identical(cmd, "flows")) {
-        o2  <- as.numeric(post_data$o2 %||% post_data$O2 %||% NA)
-        air <- as.numeric(post_data$air %||% NA)
-        n2o <- as.numeric(post_data$n2o %||% NA)
+      # /machine/flows  (POST)  {o2, air, n2o}
+      if (length(path_parts) == 2 && identical(path_parts[2], "flows")) {
+        mg <- self$simulation_engine$machine
+        if (is.null(mg)) return(list(success=FALSE, message="machine not available"))
         
-        if (is.null(dev)) return(list(success = FALSE, message = "No machine"))
-        if (!is.na(o2))  dev$set_o2_flow(o2)
-        if (!is.na(air)) dev$set_air_flow(air)
-        if (!is.na(n2o)) dev$set_n2o_flow(n2o)
+        o2  <- as.numeric(post_data$o2  %||% mg$o2_flow)
+        air <- as.numeric(post_data$air %||% mg$air_flow)
+        n2o <- as.numeric(post_data$n2o %||% mg$n2o_flow)
         
-        # nudge display immediately (it will still smooth in update)
-        cur <- list(
-          fio2  = dev$compute_fio2_from_flows(),
-          fin2o = dev$compute_fin2o_from_flows(),
-          total_fgf = dev$total_fresh_gas_flow()
-        )
-        return(c(list(success = TRUE, message = "Flows updated"), cur))
+        if (is.function(mg$set_o2_flow))  mg$set_o2_flow(o2)
+        if (is.function(mg$set_air_flow)) mg$set_air_flow(air)
+        if (is.function(mg$set_n2o_flow)) mg$set_n2o_flow(n2o)
+        
+        # Let the device update its displayed FiO2 on next tick, but also
+        # provide the immediate recompute here for convenience if available.
+        fio2 <- tryCatch(mg$compute_fio2_from_flows(), error=function(e) mg$current_fio2 %||% NA_real_)
+        
+        return(list(
+          success = TRUE,
+          message = "flows applied",
+          flows   = list(o2=o2, air=air, n2o=n2o),
+          fio2    = fio2
+        ))
       }
       
-      # /machine/connect/controlled
-      if (identical(cmd, "connect") && length(path_parts) >= 3 && identical(path_parts[3], "controlled")) {
-        if (!is.function(eng$connect_patient_to_machine_controlled))
-          return(list(success = FALSE, message = "connect_patient_to_machine_controlled() not available"))
-        eng$connect_patient_to_machine_controlled()
-        return(list(success = TRUE, message = "Connected: controlled"))
+      # /machine/apply_preset  (POST) {name: "preoxygenation"}
+      if (length(path_parts) == 2 && identical(path_parts[2], "apply_preset")) {
+        mg <- self$simulation_engine$machine
+        if (is.null(mg)) return(list(success=FALSE, message="machine not available"))
+        
+        nm <- post_data$name %||% post_data$preset %||% NULL
+        if (is.null(nm) || !nzchar(nm)) {
+          return(list(success=FALSE, message="missing preset name"))
+        }
+        
+        res <- tryCatch({
+          out <- mg$apply_preset(nm)   # we’ll make this return a list (section 2)
+          if (is.null(out) || isTRUE(out)) out <- list(ok=TRUE)  # defensive
+          list(success=TRUE, applied=nm, details=out)
+        }, error=function(e) {
+          list(success=FALSE, message=paste("apply_preset failed:", e$message))
+        })
+        
+        return(res)
       }
       
-      # /machine/connect/manual_mask  {mask_seal:?}
-      if (identical(cmd, "connect") && length(path_parts) >= 3 && identical(path_parts[3], "manual_mask")) {
-        ms <- as.numeric(post_data$mask_seal %||% 0.3)
-        if (!is.function(eng$connect_patient_to_machine_manual_mask))
-          return(list(success = FALSE, message = "connect_patient_to_machine_manual_mask() not available"))
-        eng$connect_patient_to_machine_manual_mask(mask_seal = ms)
-        return(list(success = TRUE, message = paste("Connected: manual_mask (mask_seal =", ms, ")")))
-      }
-      
-      # /machine/disconnect/room_air
-      if (identical(cmd, "disconnect") && length(path_parts) >= 3 && identical(path_parts[3], "room_air")) {
-        if (!is.function(eng$disconnect_patient_to_room_air))
-          return(list(success = FALSE, message = "disconnect_patient_to_room_air() not available"))
-        eng$disconnect_patient_to_room_air()
-        return(list(success = TRUE, message = "Disconnected to room air"))
-      }
-      
-      # Unknown concise command -> let generic walker handle it
-      return(NULL)
+      # Not handled here
+      NULL
     },
     
     # FIXED: Safe navigation with recursion depth limit and simple cycle detection
@@ -463,6 +490,12 @@ HTTPController <- R6Class(
       
       key  <- path_parts[1]
       rest <- path_parts[-1]
+      
+      if (R6::is.R6(obj) && key == "presets_path" && !length(rest)) {
+        val <- if (is.list(value) && "value" %in% names(value)) value$value else value
+        obj$set_presets_path(as.character(val))
+        return(list(obj = obj, result = list(success = TRUE, message = paste("Set presets_path to", val))))
+      }
       
       # Special handling for vaporizer paths
       if (R6::is.R6(obj) && key == "vaporizers" && length(rest) >= 2) {
@@ -611,7 +644,9 @@ HTTPController <- R6Class(
             "machine/disconnect/room_air (POST)",
             # Vaporizer shortcuts (already working):
             "machine/vaporizer_bank/vaporizers/{agent}/vaporizer_setting (POST: {value})",
-            "machine/vaporizer_bank/vaporizers/{agent}/is_open (POST: {value:true|false})"
+            "machine/vaporizer_bank/vaporizers/{agent}/is_open (POST: {value:true|false})",
+            "machine/presets (GET) - list available preset names",
+            "machine/apply_preset (POST) - body: {\"name\":\"preoxygenation\" [, \"file\":\"path.yml\"] }"
           ),
           simulation = list(
             "simulation/start (POST)",

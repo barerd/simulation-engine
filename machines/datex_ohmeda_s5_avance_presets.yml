@@ -1,0 +1,22 @@
+presets:
+  preoxygenation:
+    mode: manual_mask
+    params:
+      mask_seal: 0.2
+      # patient_minute_vent_L_min: 8   # optional
+    flows:
+      o2: 10
+      air: 0
+      n2o: 0
+    vapors:
+      sevoflurane: 0
+
+  maintenance_lowFGF:
+    mode: controlled
+    params: {}
+    flows:
+      o2: 0.5
+      air: 0.5
+      n2o: 0
+    vapors:
+      sevoflurane: 4.0
