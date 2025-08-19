@@ -53,18 +53,6 @@ DatexControlledMode <- R6Class(
       invisible(TRUE)
     },
     
-    # === COMPOSITE API ===
-    # get_fresh_gas = function() {
-    #   volatile_agents <- self$vaporizer_bank$get_volatile_agent_composition()
-    #   
-    #   list(
-    #     flow_rate = self$total_fresh_gas_flow(),
-    #     fio2 = self$current_fio2,
-    #     fin2o = self$current_fin2o,
-    #     fi_agents = volatile_agents
-    #   )
-    # },
-    
     publish_snapshot = function() {
       if (is.null(self$bus)) return(invisible())
       volatile_agents <- self$vaporizer_bank$get_volatile_agent_composition()

@@ -298,25 +298,6 @@ Lungs <- R6Class(
       
       invisible(TRUE)
     },
-    
-    # update_volatile_agents = function(dt) {
-    #   if (!length(self$Fi_agents)) return(invisible())
-    #   a_fi <- 1 - exp(-dt / max(self$tau_agent_fi_sec, 1e-6))
-    #   a_fa <- 1 - exp(-dt / max(self$tau_agent_fa_sec, 1e-6))
-    #   a_pa <- 1 - exp(-dt / max(self$tau_agent_pa_sec, 1e-6))
-    #   
-    #   for (ag in names(self$Fi_agents)) {
-    #     Fi <- as.numeric(self$Fi_agents[[ag]] %||% 0)
-    #     FA <- as.numeric(self$FA_agents[[ag]] %||% 0)
-    #     Fa <- as.numeric(self$Fa_agents[[ag]] %||% 0)
-    #     Pa <- as.numeric(self$Pa_agents[[ag]] %||% 0)
-    #     
-    #     FA <- FA + (Fi - FA) * a_fi; self$FA_agents[[ag]] <- FA
-    #     Fa <- Fa + (FA - Fa) * a_fa; self$Fa_agents[[ag]] <- Fa
-    #     Pa <- Pa + (Fa - Pa) * a_pa; self$Pa_agents[[ag]] <- Pa
-    #   }
-    #   invisible(TRUE)
-    # },
 
     # ---------- Publishing ----------
     publish_outputs = function() {

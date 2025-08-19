@@ -18,6 +18,54 @@ HTTPController <- R6Class(
         return(self$handle_root_request())
       }
       
+      # fast-path GET /machine/gas
+      if (length(path_parts) == 2 && identical(path_parts[1], "machine") && identical(path_parts[2], "gas")) {
+        mg <- self$simulation_engine$machine
+        if (is.null(mg) || !is.function(mg$get_fresh_gas)) {
+          return(list(
+            status = 404L,
+            headers = list("Content-Type" = "application/json"),
+            body = jsonlite::toJSON(list(error = "machine/gas not available"))
+          ))
+        }
+        gas <- mg$get_fresh_gas()
+        return(list(
+          status = 200L,
+          headers = list("Content-Type" = "application/json"),
+          body = jsonlite::toJSON(gas, auto_unbox = TRUE)
+        ))
+      }
+      
+      # fast-path GET /machine/flows
+      if (length(path_parts) == 2 &&
+          identical(path_parts[1], "machine") &&
+          identical(path_parts[2], "flows")) {
+        mg <- self$simulation_engine$machine
+        if (is.null(mg) || !is.function(mg$get_flows)) {
+          return(list(
+            status = 404L,
+            headers = list("Content-Type" = "application/json"),
+            body = jsonlite::toJSON(list(error = "machine/flows not available"))
+          ))
+        }
+        flows <- mg$get_flows()
+        return(list(
+          status = 200L,
+          headers = list("Content-Type" = "application/json"),
+          body = jsonlite::toJSON(flows, auto_unbox = TRUE)
+        ))
+      }
+      
+      if (length(path_parts) == 2 && identical(path_parts, c("machine","mode"))) {
+        md <- self$simulation_engine$machine$mode
+        lab <- tryCatch(md$label, error = function(e) "unknown")
+        return(list(
+          status = 200L,
+          headers = list("Content-Type" = "application/json"),
+          body = jsonlite::toJSON(list(label = lab), auto_unbox = TRUE)
+        ))
+      }
+      
       # Try to get value from patient or machine config
       result <- self$get_config_value(path_parts)
       
@@ -50,6 +98,17 @@ HTTPController <- R6Class(
         } else {
           post_data <- jsonlite::fromJSON(body)
         }
+        
+        # --- SPECIAL MACHINE COMMANDS (flows etc.) ---
+        special <- self$handle_machine_command(path_parts, post_data)
+        if (!is.null(special)) {
+          return(list(
+            status = 200L,
+            headers = list("Content-Type" = "application/json"),
+            body = jsonlite::toJSON(special, auto_unbox = TRUE)
+          ))
+        }
+        # --- END SPECIALS ---
         
         result <- self$set_config_value(path_parts, post_data)
         
@@ -128,6 +187,57 @@ HTTPController <- R6Class(
       })
     },
     
+    # handle_simulation_control = function(path_parts, value) {
+    #   if (length(path_parts) == 0) {
+    #     return(list(success = FALSE, message = "No simulation command specified"))
+    #   }
+    #   
+    #   command <- path_parts[1]
+    #   
+    #   # Debug: Check if simulation_engine exists and what type it is
+    #   if (is.null(self$simulation_engine)) {
+    #     return(list(success = FALSE, message = "simulation_engine is NULL"))
+    #   }
+    #   
+    #   tryCatch({
+    #     if (command == "start") {
+    #       # Try direct access to the method
+    #       start_method <- self$simulation_engine$start_simulation
+    #       if (is.function(start_method)) {
+    #         start_method()
+    #         return(list(success = TRUE, message = "Simulation started"))
+    #       } else {
+    #         return(list(success = FALSE, message = paste("start_simulation is not a function, it's:", class(start_method))))
+    #       }
+    #     } else if (command == "stop") {
+    #       stop_method <- self$simulation_engine$stop_simulation
+    #       if (is.function(stop_method)) {
+    #         stop_method()
+    #         return(list(success = TRUE, message = "Simulation stopped"))
+    #       } else {
+    #         return(list(success = FALSE, message = paste("stop_simulation is not a function, it's:", class(stop_method))))
+    #       }
+    #     } else if (command == "step_interval") {
+    #       # Handle both empty value and value with "value" key
+    #       new_value <- if (is.list(value) && "value" %in% names(value)) {
+    #         value$value
+    #       } else if (is.numeric(value)) {
+    #         value
+    #       } else {
+    #         return(list(success = FALSE, message = "step_interval requires a numeric value"))
+    #       }
+    #       
+    #       self$simulation_engine$step_interval <- as.numeric(new_value)
+    #       return(list(success = TRUE, message = paste("Set step interval to", new_value)))
+    #     }
+    #     
+    #     return(list(success = FALSE, message = paste("Unknown simulation command:", command)))
+    #     
+    #   }, error = function(e) {
+    #     return(list(success = FALSE, message = paste("Error executing command:", e$message)))
+    #   })
+    # },
+    
     handle_simulation_control = function(path_parts, value) {
       if (length(path_parts) == 0) {
         return(list(success = FALSE, message = "No simulation command specified"))
@@ -135,48 +245,115 @@ HTTPController <- R6Class(
       
       command <- path_parts[1]
       
-      # Debug: Check if simulation_engine exists and what type it is
       if (is.null(self$simulation_engine)) {
         return(list(success = FALSE, message = "simulation_engine is NULL"))
       }
       
       tryCatch({
         if (command == "start") {
-          # Try direct access to the method
+          if (isTRUE(self$simulation_engine$simulation_running)) {
+            return(list(
+              success = TRUE,
+              already_running = TRUE,
+              message = "Simulation already running"
+              # http_status = 200  # keep 200, but you could set 409 if you wanted
+            ))
+          }
+          # do start
           start_method <- self$simulation_engine$start_simulation
-          if (is.function(start_method)) {
-            start_method()
-            return(list(success = TRUE, message = "Simulation started"))
-          } else {
+          if (!is.function(start_method)) {
             return(list(success = FALSE, message = paste("start_simulation is not a function, it's:", class(start_method))))
           }
+          start_method()
+          return(list(success = TRUE, started = TRUE, message = "Simulation started"))
+          
         } else if (command == "stop") {
+          if (!isTRUE(self$simulation_engine$simulation_running)) {
+            return(list(
+              success = TRUE,
+              already_stopped = TRUE,
+              message = "Simulation already stopped"
+              # http_status = 200
+            ))
+          }
+          # do stop
           stop_method <- self$simulation_engine$stop_simulation
-          if (is.function(stop_method)) {
-            stop_method()
-            return(list(success = TRUE, message = "Simulation stopped"))
-          } else {
+          if (!is.function(stop_method)) {
             return(list(success = FALSE, message = paste("stop_simulation is not a function, it's:", class(stop_method))))
           }
+          stop_method()
+          return(list(success = TRUE, stopped = TRUE, message = "Simulation stopped"))
+          
         } else if (command == "step_interval") {
-          # Handle both empty value and value with "value" key
-          new_value <- if (is.list(value) && "value" %in% names(value)) {
-            value$value
-          } else if (is.numeric(value)) {
-            value
-          } else {
+          new_value <- if (is.list(value) && "value" %in% names(value)) value$value else value
+          if (!is.numeric(new_value)) {
             return(list(success = FALSE, message = "step_interval requires a numeric value"))
           }
-          
           self$simulation_engine$step_interval <- as.numeric(new_value)
           return(list(success = TRUE, message = paste("Set step interval to", new_value)))
         }
         
-        return(list(success = FALSE, message = paste("Unknown simulation command:", command)))
-        
+        list(success = FALSE, message = paste("Unknown simulation command:", command))
       }, error = function(e) {
-        return(list(success = FALSE, message = paste("Error executing command:", e$message)))
+        list(success = FALSE, message = paste("Error executing command:", e$message))
       })
+    },
+    
+    # Handle concise machine commands like /machine/flows and connect/disconnect
+    handle_machine_command = function(path_parts, post_data) {
+      if (length(path_parts) < 2 || !identical(path_parts[1], "machine")) return(NULL)
+      
+      cmd <- path_parts[2]
+      eng <- self$simulation_engine
+      dev <- eng$machine
+      
+      # /machine/flows  {o2, air, n2o}
+      if (identical(cmd, "flows")) {
+        o2  <- as.numeric(post_data$o2 %||% post_data$O2 %||% NA)
+        air <- as.numeric(post_data$air %||% NA)
+        n2o <- as.numeric(post_data$n2o %||% NA)
+        
+        if (is.null(dev)) return(list(success = FALSE, message = "No machine"))
+        if (!is.na(o2))  dev$set_o2_flow(o2)
+        if (!is.na(air)) dev$set_air_flow(air)
+        if (!is.na(n2o)) dev$set_n2o_flow(n2o)
+        
+        # nudge display immediately (it will still smooth in update)
+        cur <- list(
+          fio2  = dev$compute_fio2_from_flows(),
+          fin2o = dev$compute_fin2o_from_flows(),
+          total_fgf = dev$total_fresh_gas_flow()
+        )
+        return(c(list(success = TRUE, message = "Flows updated"), cur))
+      }
+      
+      # /machine/connect/controlled
+      if (identical(cmd, "connect") && length(path_parts) >= 3 && identical(path_parts[3], "controlled")) {
+        if (!is.function(eng$connect_patient_to_machine_controlled))
+          return(list(success = FALSE, message = "connect_patient_to_machine_controlled() not available"))
+        eng$connect_patient_to_machine_controlled()
+        return(list(success = TRUE, message = "Connected: controlled"))
+      }
+      
+      # /machine/connect/manual_mask  {mask_seal:?}
+      if (identical(cmd, "connect") && length(path_parts) >= 3 && identical(path_parts[3], "manual_mask")) {
+        ms <- as.numeric(post_data$mask_seal %||% 0.3)
+        if (!is.function(eng$connect_patient_to_machine_manual_mask))
+          return(list(success = FALSE, message = "connect_patient_to_machine_manual_mask() not available"))
+        eng$connect_patient_to_machine_manual_mask(mask_seal = ms)
+        return(list(success = TRUE, message = paste("Connected: manual_mask (mask_seal =", ms, ")")))
+      }
+      
+      # /machine/disconnect/room_air
+      if (identical(cmd, "disconnect") && length(path_parts) >= 3 && identical(path_parts[3], "room_air")) {
+        if (!is.function(eng$disconnect_patient_to_room_air))
+          return(list(success = FALSE, message = "disconnect_patient_to_room_air() not available"))
+        eng$disconnect_patient_to_room_air()
+        return(list(success = TRUE, message = "Disconnected to room air"))
+      }
+      
+      # Unknown concise command -> let generic walker handle it
+      return(NULL)
     },
     
     # FIXED: Safe navigation with recursion depth limit and simple cycle detection
@@ -240,7 +417,9 @@ HTTPController <- R6Class(
         pub_names <- names(obj)
         
         # Only include safe, non-function fields
-        safe_fields <- setdiff(pub_names, c("clone", "initialize", ".__enclos_env__"))
+        hidden <- c(".__enclos_env__", "initialize", "clone", "initialize", "subscriptions",
+                    "bus", "node_id", "parent_device", "patient", "organs", "systems")
+        safe_fields <- setdiff(pub_names, hidden)
         safe_fields <- head(safe_fields, 30)  # Limit number of fields
         
         for (nm in safe_fields) {
@@ -314,6 +493,13 @@ HTTPController <- R6Class(
           })
         }
         # For other vaporizer properties, fall through to normal handling
+      }
+      
+      # protect mode/label from direct writes
+      if (R6::is.R6(obj) && key == "mode" && length(rest) == 1 && identical(rest[1], "label")) {
+        return(list(obj = obj,
+                    result = list(success = FALSE,
+                                  message = "mode/label is read-only; use /machine/connect/* endpoints")))
       }
       
       # final hop: assign/call setter
@@ -414,7 +600,19 @@ HTTPController <- R6Class(
       tryCatch({
         available_endpoints <- list(
           patient = self$get_available_paths_safe(self$simulation_engine$patient, "patient"),
-          machine = self$get_available_paths_safe(self$simulation_engine$machine, "machine"),
+          machine = c(
+            self$get_available_paths_safe(self$simulation_engine$machine, "machine"),
+            # Friendly high-level endpoints:
+            "machine/flows (POST: {o2, air, n2o})",
+            "machine/gas (GET)",
+            "machine/flows (GET/POST)",
+            "machine/connect/controlled (POST)",
+            "machine/connect/manual_mask (POST: {mask_seal})",
+            "machine/disconnect/room_air (POST)",
+            # Vaporizer shortcuts (already working):
+            "machine/vaporizer_bank/vaporizers/{agent}/vaporizer_setting (POST: {value})",
+            "machine/vaporizer_bank/vaporizers/{agent}/is_open (POST: {value:true|false})"
+          ),
           simulation = list(
             "simulation/start (POST)",
             "simulation/stop (POST)", 

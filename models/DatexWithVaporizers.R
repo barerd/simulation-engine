@@ -53,6 +53,28 @@ DatexWithVaporizers <- R6::R6Class(
     
     get_fio2 = function() {
       self$mode$get_fio2(self)
+    },
+    
+    get_fresh_gas = function() {
+      # default delegation to "mode" if present, else compute from own fields
+      if (!is.null(self$mode) && is.function(self$mode$get_fresh_gas)) return(self$mode$get_fresh_gas())
+      volatile_agents <- if (!is.null(self$vaporizer_bank) && is.function(self$vaporizer_bank$get_volatile_agent_composition))
+        self$vaporizer_bank$get_volatile_agent_composition() else list()
+      list(
+        flow_rate = if (is.function(self$total_fresh_gas_flow)) self$total_fresh_gas_flow() else NA_real_,
+        fio2 = tryCatch(self$get_fio2(), error = function(e) 0.21),
+        fin2o = tryCatch(self$current_fin2o %||% 0, error = function(e) 0),
+        fi_agents = volatile_agents
+      )
+    },
+    
+    get_flows = function() {
+      o2  <- tryCatch(self$o2_flow,  error = function(e) NA_real_)
+      air <- tryCatch(self$air_flow, error = function(e) NA_real_)
+      n2o <- tryCatch(self$n2o_flow, error = function(e) NA_real_)
+      total <- if (is.function(self$total_fresh_gas_flow)) self$total_fresh_gas_flow()
+      else sum(c(o2, air, n2o), na.rm = TRUE)
+      list(o2 = o2, air = air, n2o = n2o, total = total)
     }
   )
 )
