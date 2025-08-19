@@ -1,10 +1,7 @@
-DatexOhmedaS5Avance <- R6Class(
-  "DatexOhmedaS5Avance", 
-  inherit = Device,
+DatexControlledMode <- R6Class(
+  "DatexControlledMode", 
+  inherit = DatexWithVaporizers,
   public = list(
-    # Component instances
-    vaporizer_bank = NULL,
-    
     # Keep gas mixing in main class (simplified approach)
     o2_flow = 2.0,
     air_flow = 2.0,
@@ -18,7 +15,7 @@ DatexOhmedaS5Avance <- R6Class(
     tidal_volume = 500,
     
     initialize = function(name, settings = list(), node_id = NULL, bus = NULL) {
-      super$initialize(name = name, topology_config = NULL, node_id = node_id, bus = bus)
+      super$initialize(name = name, node_id = node_id, bus = bus)
       
       # Apply gas settings directly (no separate component)
       self$o2_flow <- settings$o2_flow %||% self$o2_flow
@@ -26,36 +23,12 @@ DatexOhmedaS5Avance <- R6Class(
       self$n2o_flow <- settings$n2o_flow %||% self$n2o_flow
       self$fio2_response_tau <- settings$datex_tau %||% self$fio2_response_tau
       
-      # Create vaporizer bank component
-      self$vaporizer_bank <- VaporizerBank$new(
-        parent_device = self,
-        settings = settings,  # Pass full settings, VaporizerBank will extract what it needs
-        node_id = paste0(node_id, ".vaporizer_bank"),
-        bus = bus
-      )
-      
       # Initialize gas fractions
       self$current_fio2 <- self$compute_fio2_from_flows()
       self$current_fin2o <- self$compute_fin2o_from_flows()
       
-      cat("DatexOhmedaS5Avance initialized with vaporizer bank\n")
+      cat("DatexOhmedaS5Avance initialized (using parent vaporizer bank)\n")
       if (!is.null(bus)) self$publish_snapshot()
-    },
-    
-    # === DELEGATED VAPORIZER METHODS ===
-    set_vaporizer_setting = function(agent, value) {
-      self$vaporizer_bank$set_vaporizer_setting(agent, value)
-    },
-    open_vaporizer = function(agent) {
-      self$vaporizer_bank$open_vaporizer(agent)
-    },
-    close_vaporizer = function(agent) {
-      self$vaporizer_bank$close_vaporizer(agent)
-      vap <- self$vaporizers[[agent]]
-      vap$vaporizer_setting <- 0
-    },
-    get_vaporizer_status = function() {
-      self$vaporizer_bank$get_vaporizer_status()
     },
     
     # === GAS METHODS (kept in main class) ===
@@ -120,11 +93,6 @@ DatexOhmedaS5Avance <- R6Class(
         frequency = self$frequency,
         tidal_volume = self$tidal_volume
       ))
-    },
-    
-    get_current_fi_agents = function() {
-      # Source of truth = vaporizer bank
-      self$vaporizer_bank$current_fi_agents %||% list()
     }
   )
 )

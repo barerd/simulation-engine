@@ -1,5 +1,6 @@
 DatexManualMask <- R6::R6Class(
   "DatexManualMask",
+  inherit = DatexOhmedaS5Avance,
   public = list(
     machine = NULL,                # your DatexOhmedaS5Avance instance
     mask_seal = 0.3,               # 0..1 (1 = perfect seal)
