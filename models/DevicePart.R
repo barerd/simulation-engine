@@ -13,6 +13,14 @@ DevicePart <- R6::R6Class(
       if (!is.null(bus)) self$connect_bus(bus)
     },
     
+    # --- Minimal contract the base machine will call ---
+    effective_internal_volume_L = function(mode_label) 0.0,              # contributes to τ
+    flow_path_effect = function(fgf_L_min, phase, dt) fgf_L_min,         # modify fresh-gas seen by circuit
+    mixing_hook = function(gas_vec, dt) gas_vec,                         # (optional) extra mixing logic
+    tau_multiplier = function(agent) 1.0,                                # agent-specific τ tweak
+    on_mode_change = function(new_mode_label) invisible(TRUE),           # e.g. include/exclude bag volume
+    state_snapshot = function() list(),                                  # for UI/HTTP debugging
+    
     # Override this in subclasses to perform component-specific updates
     update = function(dt) {
       # Default implementation does nothing
