@@ -252,7 +252,7 @@ SimulationEngine <- R6Class(
     },
     
     connect_patient_to_machine_manual_mask = function(mask_seal = 0.3, mv_L_min = NULL) {
-      m <- DatexModeManualMask$new(mask_seal = mask_seal)
+      m <- ModeManualMask$new(mask_seal = mask_seal)
       if (!is.null(mv_L_min)) m$patient_minute_vent_L_min <- mv_L_min
       else {
         lungs <- self$patient$systems$respiratory$organs$lungs
@@ -264,7 +264,7 @@ SimulationEngine <- R6Class(
     },
     
     connect_patient_to_machine_controlled = function() {
-      self$machine$set_mode(DatexModeControlled$new())
+      self$machine$set_mode(ModeControlled$new())
       self$patient$systems$respiratory$set_gas_source(self$machine)
       invisible(TRUE)
     },
@@ -272,7 +272,7 @@ SimulationEngine <- R6Class(
     disconnect_patient_to_room_air = function() {
       # keep machine; just make mode deliver room air (no agents)
       room_mode <- R6::R6Class(
-        "DatexModeRoomAir", inherit = DatexMode,
+        "ModeRoomAir", inherit = Mode,
         public = list(
           label = "room_air",
           get_fio2 = function(machine) 0.21,

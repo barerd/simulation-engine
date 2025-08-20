@@ -1,13 +1,41 @@
-DatexWithVaporizers <- R6::R6Class(
-  "DatexWithVaporizers",
+AnesthesiaMachineWithVaporizers <- R6::R6Class(
+  "AnesthesiaMachineWithVaporizers",
   inherit = Device,
   public = list(
     presets_path = NULL,
     vaporizer_bank = NULL,
     mode = NULL,  # pluggable behavior
     
+    # --- Gas mixer (machine-level, independent of mode) ---
+    o2_flow = 2.0,
+    air_flow = 2.0,
+    n2o_flow = 0.0,
+    
+    current_fio2 = 0.21,
+    current_fin2o = 0.0,
+    fio2_response_tau = 5.0,  # display smoothing
+    
+    # ventilation knobs still live here if you want them visible on the machine
+    frequency = 12,
+    tidal_volume = 500,
+    
     initialize = function(name, settings = list(), node_id = NULL, bus = NULL) {
       super$initialize(name = name, node_id = node_id, bus = bus)
+      self$parts <- settings$parts %||% list()
+      
+      # Apply gas settings (if present in YAML)
+      self$o2_flow <- settings$o2_flow %||% self$o2_flow
+      self$air_flow <- settings$air_flow %||% self$air_flow
+      self$n2o_flow <- settings$n2o_flow %||% self$n2o_flow
+      self$fio2_response_tau <- settings$datex_tau %||% self$fio2_response_tau
+      self$frequency <- settings$frequency %||% self$frequency
+      self$tidal_volume <- settings$tidal_volume %||% self$tidal_volume
+      
+      # Initialize displayed fractions from flows
+      self$current_fio2  <- self$compute_fio2_from_flows()
+      self$current_fin2o <- self$compute_fin2o_from_flows()
+      
+      if (!is.null(bus)) self$publish_snapshot()
       
       # Reuse an existing bank (e.g., same physical vaporizers) or create new
       if (!is.null(settings$reuse_vaporizer_bank)) {
@@ -26,7 +54,24 @@ DatexWithVaporizers <- R6::R6Class(
       self$presets_path <- settings$presets_path %||% "machines/datex_ohmeda_s5_avance_presets.yml"
       
       # default mode = Manual Mask unless caller changes it
-      self$mode <- DatexModeManualMask$new()
+      self$mode <- ModeManualMask$new()
+    },
+    
+    # --- Gas mixer API ---
+    set_o2_flow = function(v) { self$o2_flow <- max(0, as.numeric(v)); invisible(TRUE) },
+    set_air_flow = function(v) { self$air_flow <- max(0, as.numeric(v)); invisible(TRUE) },
+    set_n2o_flow = function(v) { self$n2o_flow <- max(0, as.numeric(v)); invisible(TRUE) },
+    
+    compute_fio2_from_flows = function() {
+      tot <- self$total_fresh_gas_flow()
+      if (tot <= 0) return(0.21)
+      (self$o2_flow + 0.21 * self$air_flow) / tot
+    },
+    
+    compute_fin2o_from_flows = function() {
+      tot <- self$total_fresh_gas_flow()
+      if (tot <= 0) return(0.0)
+      self$n2o_flow / tot
     },
     
     # --- Common delegates (write once, reuse everywhere) ---
@@ -66,19 +111,25 @@ DatexWithVaporizers <- R6::R6Class(
       volatile_agents <- if (!is.null(self$vaporizer_bank) && is.function(self$vaporizer_bank$get_volatile_agent_composition))
         self$vaporizer_bank$get_volatile_agent_composition() else list()
       list(
-        flow_rate = if (is.function(self$total_fresh_gas_flow)) self$total_fresh_gas_flow() else NA_real_,
+        flow_rate = self$total_fresh_gas_flow(),
         fio2 = tryCatch(self$get_fio2(), error = function(e) 0.21),
         fin2o = tryCatch(self$current_fin2o %||% 0, error = function(e) 0),
         fi_agents = volatile_agents
       )
     },
     
+    total_fresh_gas_flow = function() {
+      o2  <- suppressWarnings(as.numeric(self$o2_flow  %||% 0))
+      air <- suppressWarnings(as.numeric(self$air_flow %||% 0))
+      n2o <- suppressWarnings(as.numeric(self$n2o_flow %||% 0))
+      o2 + air + n2o
+    },
+    
     get_flows = function() {
       o2  <- tryCatch(self$o2_flow,  error = function(e) NA_real_)
       air <- tryCatch(self$air_flow, error = function(e) NA_real_)
       n2o <- tryCatch(self$n2o_flow, error = function(e) NA_real_)
-      total <- if (is.function(self$total_fresh_gas_flow)) self$total_fresh_gas_flow()
-      else sum(c(o2, air, n2o), na.rm = TRUE)
+      total <- self$total_fresh_gas_flow()
       list(o2 = o2, air = air, n2o = n2o, total = total)
     },
     
@@ -116,14 +167,14 @@ DatexWithVaporizers <- R6::R6Class(
       
       if (mode_name %in% c("manual_mask","manual","mask")) {
         # Fill defaults if not provided
-        mm <- DatexModeManualMask$new(
+        mm <- ModeManualMask$new(
           mask_seal = params$mask_seal %||% 0.3,
           patient_minute_vent_L_min = params$patient_minute_vent_L_min %||% 6,
           extra_leak_L_min = params$extra_leak_L_min %||% 0
         )
         self$set_mode(mm)
       } else if (mode_name %in% c("controlled","vent","volume","pressure")) {
-        cm <- DatexModeControlled$new()  # add params handling here if needed later
+        cm <- ModeControlled$new()  # add params handling here if needed later
         self$set_mode(cm)
       } else if (nzchar(mode_name)) {
         stop(sprintf("Unknown mode '%s' in preset '%s'", mode_name, name))
@@ -161,7 +212,7 @@ DatexWithVaporizers <- R6::R6Class(
     
     # concrete mode setters that replace self$mode and apply params
     set_mode_manual_mask = function(params = list()) {
-      self$mode <- DatexModeManualMask$new()
+      self$mode <- ModeManualMask$new()
       # known params: mask_seal, patient_minute_vent_L_min, extra_leak_L_min
       if (!is.null(params$mask_seal))               self$mode$mask_seal               <- as.numeric(params$mask_seal)
       if (!is.null(params$patient_minute_vent_L_min)) self$mode$patient_minute_vent_L_min <- as.numeric(params$patient_minute_vent_L_min)
@@ -170,10 +221,44 @@ DatexWithVaporizers <- R6::R6Class(
     },
     
     set_mode_controlled = function(params = list()) {
-      self$mode <- DatexModeControlled$new()
+      self$mode <- ModeControlled$new()
       # add controlled-mode params here as needed (e.g., frequency, tidal_volume, etc.)
       if (!is.null(params$frequency) && !is.null(self$frequency))   self$frequency   <- as.numeric(params$frequency)
       if (!is.null(params$tidal_volume) && !is.null(self$tidal_volume)) self$tidal_volume <- as.numeric(params$tidal_volume)
+      invisible(TRUE)
+    },
+    
+    update = function(dt) {
+      # Smooth the displayed FiO2/FiN2O towards the mixer’s instantaneous value
+      alpha <- 1 - exp(-dt / max(1e-6, self$fio2_response_tau))
+      self$current_fio2  <- self$current_fio2  + (self$compute_fio2_from_flows()  - self$current_fio2)  * alpha
+      self$current_fin2o <- self$current_fin2o + (self$compute_fin2o_from_flows() - self$current_fin2o) * alpha
+      
+      # Drive vaporizer bank dynamics
+      if (!is.null(self$vaporizer_bank) && is.function(self$vaporizer_bank$update)) {
+        self$vaporizer_bank$update(dt)
+      }
+      
+      # Broadcast
+      if (is.function(self$publish_snapshot)) self$publish_snapshot()
+      invisible(TRUE)
+    },
+    
+    publish_snapshot = function() {
+      if (is.null(self$bus)) return(invisible())
+      volatile_agents <- tryCatch(self$vaporizer_bank$get_volatile_agent_composition(), error=function(e) list())
+      
+      self$publish_params(list(
+        device = self$name,
+        flows = list(o2 = self$o2_flow, air = self$air_flow, n2o = self$n2o_flow),
+        total_fresh_gas_flow = self$total_fresh_gas_flow(),
+        fio2 = self$current_fio2,
+        fin2o = self$current_fin2o,
+        fi_agents = volatile_agents,
+        mode = tryCatch(self$mode$label, error=function(e) NA_character_),
+        frequency = self$frequency,
+        tidal_volume = self$tidal_volume
+      ))
       invisible(TRUE)
     }
   )

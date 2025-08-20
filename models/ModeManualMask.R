@@ -1,5 +1,5 @@
-DatexModeManualMask <- R6::R6Class(
-  "DatexModeManualMask",
+ModeManualMask <- R6::R6Class(
+  "ModeManualMask",
   inherit = DatexMode,
   public = list(
     label = "manual_mask",

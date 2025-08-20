@@ -269,63 +269,6 @@ HTTPController <- R6Class(
       })
     },
     
-    # Handle concise machine commands like /machine/flows and connect/disconnect
-    # handle_machine_command = function(path_parts, post_data) {
-    #   if (length(path_parts) < 2 || !identical(path_parts[1], "machine")) return(NULL)
-    #   
-    #   cmd <- path_parts[2]
-    #   eng <- self$simulation_engine
-    #   dev <- eng$machine
-    #   
-    #   # /machine/flows  {o2, air, n2o}
-    #   if (identical(cmd, "flows")) {
-    #     o2  <- as.numeric(post_data$o2 %||% post_data$O2 %||% NA)
-    #     air <- as.numeric(post_data$air %||% NA)
-    #     n2o <- as.numeric(post_data$n2o %||% NA)
-    #     
-    #     if (is.null(dev)) return(list(success = FALSE, message = "No machine"))
-    #     if (!is.na(o2))  dev$set_o2_flow(o2)
-    #     if (!is.na(air)) dev$set_air_flow(air)
-    #     if (!is.na(n2o)) dev$set_n2o_flow(n2o)
-    #     
-    #     # nudge display immediately (it will still smooth in update)
-    #     cur <- list(
-    #       fio2  = dev$compute_fio2_from_flows(),
-    #       fin2o = dev$compute_fin2o_from_flows(),
-    #       total_fgf = dev$total_fresh_gas_flow()
-    #     )
-    #     return(c(list(success = TRUE, message = "Flows updated"), cur))
-    #   }
-    #   
-    #   # /machine/connect/controlled
-    #   if (identical(cmd, "connect") && length(path_parts) >= 3 && identical(path_parts[3], "controlled")) {
-    #     if (!is.function(eng$connect_patient_to_machine_controlled))
-    #       return(list(success = FALSE, message = "connect_patient_to_machine_controlled() not available"))
-    #     eng$connect_patient_to_machine_controlled()
-    #     return(list(success = TRUE, message = "Connected: controlled"))
-    #   }
-    #   
-    #   # /machine/connect/manual_mask  {mask_seal:?}
-    #   if (identical(cmd, "connect") && length(path_parts) >= 3 && identical(path_parts[3], "manual_mask")) {
-    #     ms <- as.numeric(post_data$mask_seal %||% 0.3)
-    #     if (!is.function(eng$connect_patient_to_machine_manual_mask))
-    #       return(list(success = FALSE, message = "connect_patient_to_machine_manual_mask() not available"))
-    #     eng$connect_patient_to_machine_manual_mask(mask_seal = ms)
-    #     return(list(success = TRUE, message = paste("Connected: manual_mask (mask_seal =", ms, ")")))
-    #   }
-    #   
-    #   # /machine/disconnect/room_air
-    #   if (identical(cmd, "disconnect") && length(path_parts) >= 3 && identical(path_parts[3], "room_air")) {
-    #     if (!is.function(eng$disconnect_patient_to_room_air))
-    #       return(list(success = FALSE, message = "disconnect_patient_to_room_air() not available"))
-    #     eng$disconnect_patient_to_room_air()
-    #     return(list(success = TRUE, message = "Disconnected to room air"))
-    #   }
-    #   
-    #   # Unknown concise command -> let generic walker handle it
-    #   return(NULL)
-    # },
-    
     handle_machine_command = function(path_parts, post_data) {
       # Returns a plain R list (content) on handled paths, or NULL if not handled.
       # handle_post_request will wrap this into a proper HTTP response.

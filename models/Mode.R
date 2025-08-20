@@ -1,5 +1,5 @@
-DatexMode <- R6::R6Class(
-  "DatexMode",
+Mode <- R6::R6Class(
+  "Mode",
   public = list(
     label = "base",
     get_fio2 = function(machine) 0.21,

@@ -1,5 +1,5 @@
-DatexModeControlled <- R6::R6Class(
-  "DatexModeControlled",
+ModeControlled <- R6::R6Class(
+  "ModeControlled",
   inherit = DatexMode,
   public = list(
     label = "controlled",
