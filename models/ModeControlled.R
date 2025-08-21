@@ -1,6 +1,6 @@
 ModeControlled <- R6::R6Class(
   "ModeControlled",
-  inherit = DatexMode,
+  inherit = Mode,
   public = list(
     label = "controlled",
     get_fio2 = function(machine) {

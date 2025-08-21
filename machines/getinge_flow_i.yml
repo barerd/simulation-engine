@@ -1,10 +1,11 @@
 device:
   class: "AnesthesiaMachineWithVaporizers"
-  name: "datex_ohmeda_s5_avance"
-  manufacturer: "Datex Ohmeda"
-  model: "S5/Avance"
-  year: 2018
+  name: "getinge_flow_i"
+  manufacturer: "Getinge"
+  model: "Flow-i"
+  year: 2020
 
+  # flows & vents (examples)
   o2_flow: 2.0
   air_flow: 2.0
   n2o_flow: 0.0
@@ -14,6 +15,7 @@ device:
   fio2_response_tau: 5.0
   fgf_inlet_position: "post_absorber"
 
+  # vaporizers
   max_slots: 2
   agents: ["sevoflurane","desflurane"]
   vaporizers:
@@ -21,12 +23,19 @@ device:
     desflurane: { vaporizer_setting: 0, is_open: false, response_tau: 3.0 }
 
   parts:
-    CO2Absorber:
+    absorber:
       type: "CO2Absorber"
       canister_volume_L: 1.0
-      material: "SodaLime"
-      efficiency: 0.8
-      capacity_mmol: 0
+      material: "Amsorb"
+      efficiency: 0.9
+    reflector:
+      type: "Reflector"
+      volume_L: 0.8
+      efficiency: 0.85
+      # optional per‑agent τ multipliers:
+      tau_multiplier:
+        sevoflurane: 1.3
+        desflurane: 1.15
     reservoir_bag:
       type: "ReservoirBag"
       bag_volume_L: 3.0

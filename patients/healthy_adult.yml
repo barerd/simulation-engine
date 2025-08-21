@@ -22,3 +22,7 @@ systems:
     tidal_volume: 500
     Fi_agent: 0
     Fa_agent: 0
+  - name: "metabolism"
+    class: "MetabolicSystem"
+    vo2_ml_min: 250
+    vco2_ml_min: 200

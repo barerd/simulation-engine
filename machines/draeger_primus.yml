@@ -1,8 +1,8 @@
 device:
   class: "AnesthesiaMachineWithVaporizers"
-  name: "datex_ohmeda_s5_avance"
-  manufacturer: "Datex Ohmeda"
-  model: "S5/Avance"
+  name: "draeger_primus"
+  manufacturer: "Dräger"
+  model: "Primus"
   year: 2018
 
   o2_flow: 2.0
@@ -12,7 +12,7 @@ device:
   tidal_volume: 500
 
   fio2_response_tau: 5.0
-  fgf_inlet_position: "post_absorber"
+  fgf_inlet_position: "pre_absorber"
 
   max_slots: 2
   agents: ["sevoflurane","desflurane"]
@@ -21,13 +21,12 @@ device:
     desflurane: { vaporizer_setting: 0, is_open: false, response_tau: 3.0 }
 
   parts:
-    CO2Absorber:
+    absorber:
       type: "CO2Absorber"
       canister_volume_L: 1.0
-      material: "SodaLime"
-      efficiency: 0.8
-      capacity_mmol: 0
+      material: "Amsorb"
+      efficiency: 0.9
     reservoir_bag:
       type: "ReservoirBag"
       bag_volume_L: 3.0
-      include_in_controlled: false
+      include_in_controlled: true   # ← Primus behavior

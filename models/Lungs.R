@@ -57,20 +57,23 @@ Lungs <- R6Class(
     # Add params field to avoid locked environment error
     params = NULL,
     
-    set_local_param = function(key, value, notify = TRUE) {
-      # Initialize params if NULL
-      if (is.null(self$params)) {
-        self$params <- list()
-      }
-      
-      # Prefer publishing to the bus under this node's scope
-      if (!is.null(self$bus) && !is.null(self$node_id)) {
-        return(invisible(self$bus$set_param(self$node_id, key, value, notify = notify)))
-      }
-      
-      # Fallback: keep a local field so the value is still visible if no bus
-      self$params[[key]] <- value
-      invisible(TRUE)
+    # configurable (or from patient YAML)
+    VDaw_mL = 150,           # anatomic + apparatus dead space (mL)
+    phase2_k = 12,           # higher = steeper phase II (unitless)
+    phase3_slope = 0.25,     # mmHg per %VT, crude linear slope in phase III
+    
+    last_etco2_mmHg = NA_real_,
+    last_vco2_ml_per_breath = NA_real_,
+    
+    # convenience ETCO2 getter
+    get_etco2_mmHg = function() {
+      x <- self$last_etco2_mmHg %||% NA_real_
+      if (is.na(x)) x <- as.numeric(self$PACO2 %||% NA_real_)
+      x
+    },
+    
+    get_etco2_kPa = function() {
+      self$get_etco2_mmHg() * 0.133322
     },
     
     initialize = function(name = "lungs", patient = NULL, config = list(),
@@ -103,7 +106,7 @@ Lungs <- R6Class(
       
       if (!is.null(config$alveolar_po2))       self$alveolar_po2       <- config$alveolar_po2
       if (!is.null(config$arterial_o2))       self$arterial_o2       <- config$arterial_o2
-        
+      
       # Metabolism (optional)
       if (!is.null(self$bus)) {
         self$subscribe(
@@ -121,6 +124,26 @@ Lungs <- R6Class(
             if (is.finite(self$last_vco2_ml_min) && is.finite(self$last_vo2_ml_min) && self$last_vo2_ml_min > 0)
               self$RQ <- self$last_vco2_ml_min / self$last_vo2_ml_min
             self$compute_targets(); self$publish_outputs()
+          },
+          replay = TRUE
+        )
+      }
+      
+      # Ventilation subscriptions (from machine)
+      if (!is.null(self$bus)) {
+        self$subscribe(
+          pattern = "^state/.*/VA_L_min$",
+          callback = function(topic, msg) {
+            self$VA_L_min <- as.numeric(if (is.list(msg) && !is.null(msg$value)) msg$value else msg)
+            self$compute_targets(); self$publish_outputs()
+          },
+          replay = TRUE
+        )
+        self$subscribe(
+          pattern = "^state/.*/deadspace_frac$",
+          callback = function(topic, msg) {
+            # keep locally if you want to expose it or use it in later formulas
+            self$set_local_param("deadspace_frac", as.numeric(if (is.list(msg) && !is.null(msg$value)) msg$value else msg), TRUE)
           },
           replay = TRUE
         )
@@ -144,6 +167,22 @@ Lungs <- R6Class(
       }
       
       self$publish_outputs()
+    },
+    
+    set_local_param = function(key, value, notify = TRUE) {
+      # Initialize params if NULL
+      if (is.null(self$params)) {
+        self$params <- list()
+      }
+      
+      # Prefer publishing to the bus under this node's scope
+      if (!is.null(self$bus) && !is.null(self$node_id)) {
+        return(invisible(self$bus$set_param(self$node_id, key, value, notify = notify)))
+      }
+      
+      # Fallback: keep a local field so the value is still visible if no bus
+      self$params[[key]] <- value
+      invisible(TRUE)
     },
     
     # --- plug/unplug inspired gas source ---
@@ -257,6 +296,80 @@ Lungs <- R6Class(
       invisible(TRUE)
     },
     
+    # compute a single-breath VOL capnogram; returns list(vol_mL, FEco2_mmHg, PetCO2, VCO2_ml)
+    breath_capnogram = function(VT_mL, PACO2_mmHg, VDaw_mL = self$VDaw_mL,
+                                k2 = self$phase2_k, s3 = self$phase3_slope,
+                                n_pts = 120) {
+      VT <- max(1, as.numeric(VT_mL)); VD <- max(0, as.numeric(VDaw_mL))
+      PACO2 <- max(0, as.numeric(PACO2_mmHg))
+      v <- seq(0, VT, length.out = n_pts)
+      
+      FE <- numeric(n_pts)
+      # Phase I: 0..VD : ~0 CO2
+      i1 <- v <= VD
+      FE[i1] <- 0
+      
+      # Phase II: logistic rise from 0 at VD to ~PACO2 at VD+Δ
+      # Δ chosen as ~15% VT; k2 controls steepness
+      v0 <- VD
+      d  <- 0.15 * VT
+      i2 <- v > VD & v <= (VD + d)
+      x2 <- (v[i2] - v0) / d
+      FE[i2] <- PACO2 / (1 + exp(-k2 * (x2 - 0.5)))  # centered sigmoid
+      
+      # Phase III: ramp across remaining volume with slope s3 (mmHg per %VT)
+      i3 <- v > (VD + d)
+      if (any(i3)) {
+        v3 <- v[i3]
+        base <- PACO2 * 0.95  # start slightly below PACO2
+        frac <- (v3 - (VD + d)) / max(1e-6, VT - (VD + d))
+        FE[i3] <- pmin(PACO2, base + s3 * 100 * frac)  # cap at PACO2
+      }
+      
+      Pet <- FE[n_pts]
+      # VCO2 per breath (mL STPD approx): trapezoid integral / 713 (mmHg to fraction)*VT?
+      # Simpler: convert mmHg to fraction by dividing by PB ~ 713 mmHg (BTPS-ish)
+      # and multiply by breath volume in mL => mL CO2
+      PB <- 713 # effective alveolar total pressure (mmHg)
+      Ffrac <- FE / PB
+      VCO2_ml <- sum( (head(Ffrac,-1) + tail(Ffrac,-1))/2 * diff(v) )
+      
+      list(vol_mL = v, FEco2_mmHg = FE, PetCO2 = Pet, VCO2_ml = VCO2_ml)
+    },
+    
+    # one-step interface from the machine:
+    # given an inspiratory stream (fractions), produce an EXHALED stream (fractions)
+    step_with_inspiratory = function(insp_stream, dt) {
+      # Update O2/volatile targets as you already do
+      self$pull_from_gas_source()  # optional if you want to reuse existing code
+      
+      # Rebuild minute ventilation from machine if available (or keep VA_L_min)
+      VT <- (self$patient$systems$respiratory$params$tidal_volume_mL %||% 500)
+      RR <- (self$patient$systems$respiratory$params$rate_bpm %||% 12)
+      # Your model already computes PACO2 target from VA & VCO2:
+      PACO2_now <- as.numeric(self$PACO2 %||% 40)
+      
+      cg <- self$breath_capnogram(VT, PACO2_now, VDaw_mL = self$VDaw_mL,
+                                  k2 = self$phase2_k, s3 = self$phase3_slope)
+      self$last_etco2_mmHg <- cg$PetCO2
+      self$last_vco2_ml_per_breath <- cg$VCO2_ml
+      
+      # Build exhaled stream fractions from the *mean* expired CO2 on this breath
+      PB <- 713
+      mean_FE_mmHg <- mean(cg$FEco2_mmHg)
+      FEfrac <- mean_FE_mmHg / PB
+      # Start from inspiratory mix and overwrite CO2; renormalize
+      fr_in <- insp_stream$fr
+      fr_out <- fr_in
+      fr_out$CO2 <- FEfrac
+      # renorm others (keep O2 + agents relative proportions)
+      sum_nonco2 <- max(1e-9, 1 - (fr_in$CO2 %||% 0))
+      scale <- (1 - FEfrac) / sum_nonco2
+      for (k in names(fr_out)) if (k != "CO2") fr_out[[k]] <- as.numeric(fr_in[[k]] %||% 0) * scale
+      
+      make_stream(flow_L_min = insp_stream$flow_L_min, fr_out)
+    },
+    
     # ---------- Volatiles: Fi -> FA -> Fa -> Pa ----------
     update_volatile_agents = function(dt) {
       # 1) read incoming Fi from gas_source (may be NULL/empty)
@@ -309,6 +422,9 @@ Lungs <- R6Class(
       self$set_local_param("RQ",           self$RQ,           TRUE)
       self$set_local_param("target_paco2", self$target_paco2, TRUE)
       self$set_local_param("target_pao2",  self$target_pao2,  TRUE)
+      self$set_local_param("EtCO2_mmHg", self$get_etco2_mmHg(), TRUE)
+      self$set_local_param("EtCO2_mmHg", self$last_etco2_mmHg, TRUE)
+      self$set_local_param("VCO2_ml_per_breath", self$last_vco2_ml_per_breath, TRUE)
       
       # Volatiles
       self$set_local_param("Fi_agents", self$Fi_agents, TRUE)   # delivered target (Y-piece)

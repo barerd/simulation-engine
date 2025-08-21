@@ -5,7 +5,7 @@ VaporizerBank <- R6Class(
     # Vaporizer slots - typically 2 slots on real machines
     max_slots = 2,
     
-    # Vaporizer configuration: agent_name -> {setting, is_open, response_tau, decay_tau, slot_number}
+    # Vaporizer configuration: agent_name -> {vaporizer_setting, response_tau, residual_decay_tau}
     vaporizers = list(),
     
     # Current delivered fractions (smoothed)
@@ -229,15 +229,15 @@ VaporizerBank <- R6Class(
       if (is.null(v)) return(0)
       
       if (isTRUE(v$is_open)) {
-        # Vaporizer is open: approach the dialed setting
-        target_fi <- (v$vaporizer_setting %||% 0) / 100  # Convert % to fraction
-        alpha_val <- self$alpha(dt, v$response_tau %||% 5)
-        new_val <- current_fi + (target_fi - current_fi) * alpha_val
+        target_fi <- (v$vaporizer_setting %||% 0) / 100
+        tau_eff   <- self$effective_tau(v$response_tau %||% 5, agent, "response")
+        alpha_val <- self$alpha(dt, tau_eff)
+        new_val   <- current_fi + (target_fi - current_fi) * alpha_val
         return(new_val)
       } else {
-        # Vaporizer is closed: decay toward zero (residual washout)
-        alpha_val <- self$alpha(dt, v$residual_decay_tau %||% 60)
-        new_val <- current_fi + (0 - current_fi) * alpha_val
+        tau_eff   <- self$effective_tau(v$residual_decay_tau %||% 60, agent, "decay")
+        alpha_val <- self$alpha(dt, tau_eff)
+        new_val   <- current_fi + (0 - current_fi) * alpha_val
         return(new_val)
       }
     },
@@ -321,7 +321,7 @@ VaporizerBank <- R6Class(
       }
       
       # Method 1: Use the standard publish_params (if available from DevicePart)
-      if (exists("publish_params", where = self, inherits = TRUE)) {
+      if (is.function(self$publish_params)) {
         tryCatch({
           self$publish_params(list(
             component = "vaporizer_bank",
@@ -353,6 +353,51 @@ VaporizerBank <- R6Class(
     get_current_fi_agents = function() {
       # Always return a plain named list of numerics
       lapply(self$current_fi_agents, as.numeric)
+    },
+    
+    # Combine per‑part tau multipliers for the given agent
+    # tau_mult_for = function(agent) {
+    #   mult <- 1.0
+    #   pd <- self$parent_device
+    #   if (!is.null(pd) && is.list(pd$parts)) {
+    #     for (pr in pd$parts) {
+    #       if (isTRUE(pr$enabled) && is.function(pr$tau_multiplier)) {
+    #         m <- suppressWarnings(as.numeric(pr$tau_multiplier(agent)))
+    #         if (is.finite(m) && m > 0) mult <- mult * m
+    #       }
+    #     }
+    #   }
+    #   mult
+    # },
+    
+    # ---- τ helpers -------------------------------------------------------------
+    effective_tau = function(base_tau, agent, kind = c("response","decay")) {
+      kind <- match.arg(kind)
+      mult <- 1.0
+      
+      # machine-level static overrides (optional; set by YAML)
+      pd <- self$parent_device
+      if (!is.null(pd) && !is.null(pd$tau_multipliers) && is.list(pd$tau_multipliers)) {
+        tm <- pd$tau_multipliers[[agent]]
+        if (is.list(tm)) {
+          if (kind == "response" && !is.null(tm$response)) mult <- mult * as.numeric(tm$response)
+          if (kind == "decay"    && !is.null(tm$decay))    mult <- mult * as.numeric(tm$decay)
+        } else if (!is.null(tm)) {
+          mult <- mult * as.numeric(tm)  # allow a single number = both
+        }
+      }
+      
+      # ask each attached part (Reflector, ReservoirBag, CO2Absorber, …)
+      if (!is.null(pd) && is.list(pd$parts)) {
+        for (p in pd$parts) {
+          if (is.environment(p) && is.function(p$tau_multiplier)) {
+            m <- tryCatch(as.numeric(p$tau_multiplier(agent, kind)), error=function(e) 1.0)
+            if (is.finite(m) && m > 0) mult <- mult * m
+          }
+        }
+      }
+      
+      as.numeric(base_tau) * mult
     }
   )
 )

@@ -18,6 +18,67 @@ HTTPController <- R6Class(
         return(self$handle_root_request())
       }
       
+      # GET /machine/parts  -> list of parts (name, type, enabled)
+      if (length(path_parts) == 2 && identical(path_parts, c("machine","parts"))) {
+        mg <- self$simulation_engine$machine
+        if (is.null(mg) || !is.list(mg$parts)) {
+          return(list(
+            status = 404L,
+            headers = list("Content-Type" = "application/json"),
+            body = jsonlite::toJSON(list(error = "No parts attached"), auto_unbox = TRUE)
+          ))
+        }
+        out <- lapply(names(mg$parts), function(nm) {
+          p <- mg$parts[[nm]]
+          list(name = nm,
+               type = class(p)[1],
+               enabled = tryCatch(isTRUE(p$enabled), error = function(e) NA))
+        })
+        return(list(
+          status = 200L,
+          headers = list("Content-Type" = "application/json"),
+          body = jsonlite::toJSON(out, auto_unbox = TRUE)
+        ))
+      }
+      
+      # GET /machine/parts/{name} -> summary_state() of a single part
+      if (length(path_parts) == 3 && identical(path_parts[1:2], c("machine","parts"))) {
+        mg <- self$simulation_engine$machine
+        nm <- path_parts[3]
+        if (is.null(mg) || is.null(mg$parts[[nm]])) {
+          return(list(
+            status = 404L,
+            headers = list("Content-Type" = "application/json"),
+            body = jsonlite::toJSON(list(error = paste("Part not found:", nm)), auto_unbox = TRUE)
+          ))
+        }
+        s <- tryCatch(mg$parts[[nm]]$summary_state(),
+                      error = function(e) list(error = e$message))
+        return(list(
+          status = 200L,
+          headers = list("Content-Type" = "application/json"),
+          body = jsonlite::toJSON(s, auto_unbox = TRUE)
+        ))
+      }
+      
+      # GET /machine/compartments -> combined snapshot (mode, volumes, rebreathing, per-part)
+      if (length(path_parts) == 2 && identical(path_parts, c("machine","compartments"))) {
+        mg <- self$simulation_engine$machine
+        if (is.null(mg) || !is.function(mg$get_compartments_snapshot)) {
+          return(list(
+            status = 404L,
+            headers = list("Content-Type" = "application/json"),
+            body = jsonlite::toJSON(list(error = "compartments not available"), auto_unbox = TRUE)
+          ))
+        }
+        snap <- mg$get_compartments_snapshot()
+        return(list(
+          status = 200L,
+          headers = list("Content-Type" = "application/json"),
+          body = jsonlite::toJSON(snap, auto_unbox = TRUE)
+        ))
+      }
+      
       # fast-path GET /machine/gas
       if (length(path_parts) == 2 && identical(path_parts[1], "machine") && identical(path_parts[2], "gas")) {
         mg <- self$simulation_engine$machine
@@ -589,7 +650,10 @@ HTTPController <- R6Class(
             "machine/vaporizer_bank/vaporizers/{agent}/vaporizer_setting (POST: {value})",
             "machine/vaporizer_bank/vaporizers/{agent}/is_open (POST: {value:true|false})",
             "machine/presets (GET) - list available preset names",
-            "machine/apply_preset (POST) - body: {\"name\":\"preoxygenation\" [, \"file\":\"path.yml\"] }"
+            "machine/apply_preset (POST) - body: {\"name\":\"preoxygenation\" [, \"file\":\"path.yml\"] }",
+            "machine/parts (GET) - list attached parts",
+            "machine/parts/{name} (GET) - detail for a part",
+            "machine/compartments (GET) - effective volumes & rebreathing snapshot"
           ),
           simulation = list(
             "simulation/start (POST)",

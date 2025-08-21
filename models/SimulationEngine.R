@@ -52,6 +52,30 @@ SimulationEngine <- R6Class(
         }
       }
       
+      # Wire lungs <-> machine both ways (pull AND push)
+      if (!is.null(self$patient) &&
+          !is.null(self$patient$systems$respiratory) &&
+          !is.null(self$machine)) {
+        
+        rs <- self$patient$systems$respiratory
+        
+        # 1) Lungs pull from machine (you already have this, keeping it here for completeness)
+        if (is.function(rs$set_gas_source)) {
+          rs$set_gas_source(self$machine)
+        } else if (!is.null(rs$organs$lungs) && is.function(rs$organs$lungs$set_gas_source)) {
+          rs$organs$lungs$set_gas_source(self$machine)
+        }
+        
+        # 2) Machine gets a direct lungs handle for step_with_inspiratory()
+        lungs_obj <- NULL
+        if (!is.null(rs$organs) && !is.null(rs$organs$lungs)) {
+          lungs_obj <- rs$organs$lungs
+        } else if (inherits(rs, "Lungs")) {
+          lungs_obj <- rs
+        }
+        if (!is.null(lungs_obj)) self$machine$lungs_ref <- lungs_obj
+      }
+      
       # Initialize HTTP controller and server
       self$http_controller <- HTTPController$new(self)
       self$initialize_http_server()
@@ -89,6 +113,13 @@ SimulationEngine <- R6Class(
         }
         
         self$patient <- patient
+        
+        if (!is.null(self$bus)) {
+          if (!is.null(patient_config$vo2_ml_min))
+            self$bus$set_param("patient", "vo2_ml_min",  as.numeric(patient_config$vo2_ml_min), notify = TRUE)
+          if (!is.null(patient_config$vco2_ml_min))
+            self$bus$set_param("patient", "vco2_ml_min", as.numeric(patient_config$vco2_ml_min), notify = TRUE)
+        }
       }
     },
     

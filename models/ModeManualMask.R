@@ -1,6 +1,6 @@
 ModeManualMask <- R6::R6Class(
   "ModeManualMask",
-  inherit = DatexMode,
+  inherit = Mode,
   public = list(
     label = "manual_mask",
     mask_seal = 0.3,
@@ -26,6 +26,11 @@ ModeManualMask <- R6::R6Class(
       eff <- self$.eff(machine)
       vol <- machine$vaporizer_bank$get_volatile_agent_composition()
       lapply(vol, function(x) eff * as.numeric(x))
+    },
+    
+    get_minute_vent_L_min = function(machine) {
+      # what you already store as 'patient_minute_vent_L_min'
+      as.numeric(self$patient_minute_vent_L_min %||% 6)
     }
   )
 )

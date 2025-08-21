@@ -37,17 +37,18 @@ engine$patient$systems$respiratory$get_fA("sevoflurane")
 engine$patient$systems$respiratory$get_Pa("sevoflurane")
 engine$patient$systems$respiratory$PaCO2
 engine$patient$systems$respiratory$arterial_o2
+engine$machine$get_fresh_gas()
 
 engine$connect_patient_to_machine_controlled()
 engine$machine$vaporizer_bank$open_vaporizer("sevoflurane")
 engine$machine$set_vaporizer_setting("sevoflurane", 3)
-# engine$machine$vaporizer_bank$vaporizers$sevoflurane$vaporizer_setting <- 2
 engine$machine$vaporizer_bank$get_current_fi_agents()
 engine$patient$systems$respiratory$get_fi("sevoflurane")
 engine$patient$systems$respiratory$get_fA("sevoflurane")
 engine$patient$systems$respiratory$get_Pa("sevoflurane")
 engine$patient$systems$respiratory$PaCO2
 engine$patient$systems$respiratory$arterial_o2
+engine$machine$get_fresh_gas()
 
 engine$machine$close_vaporizer("sevoflurane")
 engine$connect_patient_to_machine_manual_mask(mask_seal=0.2) # preoxygenation, leaky mask
@@ -58,6 +59,12 @@ engine$patient$systems$respiratory$get_fA("sevoflurane")
 engine$patient$systems$respiratory$get_Pa("sevoflurane")
 engine$patient$systems$respiratory$PaCO2
 engine$patient$systems$respiratory$arterial_o2
+engine$machine$get_fresh_gas()
+
+engine$machine$o2_flow <- 0.5
+engine$machine$air_flow <- 0
+engine$machine$frequency <- 8
+engine$machine$get_fresh_gas()
 
 engine$stop_simulation()
 
